@@ -638,10 +638,12 @@ final class BrowserModel: ObservableObject {
         }
 
         let projectNameJSON = jsonLiteral(selectedProject?.name ?? "")
+        let allProjectNamesJSON = jsonArrayLiteral(projects.map(\.name))
 
         let js = """
         (function() {
             const selectedProjectName = \(projectNameJSON);
+            const knownProjectNames = new Set(\(allProjectNamesJSON));
 
             function collectDocs(root, offsetX = 0, offsetY = 0, depth = 0) {
                 const result = [{ doc: root, offsetX, offsetY, depth }];
@@ -766,6 +768,7 @@ final class BrowserModel: ObservableObject {
 
                 if (text.length < 2 || text.length > 100) return true;
                 if (text === selectedProjectName) return true;
+                if (knownProjectNames.has(text)) return true;
                 if (isMetadata(text)) return true;
                 if (/^(ITG|Brabio)$/i.test(text)) return true;
                 if (/ブラビオへようこそ|トップページ/.test(text)) return true;
@@ -821,8 +824,15 @@ final class BrowserModel: ObservableObject {
             const projectX = projectMarker.r.left;
             const projectY = projectMarker.r.cy;
 
-            // Find next sibling project so we only inspect this project's rows.
+            // Find the NEXT REAL PROJECT heading using the exact project names
+            // already discovered by the native project directory.
+            //
+            // v1.8 used indentation + suffix matching here. On Brabio, different
+            // project rows can have slightly different nested X positions, so the
+            // next project heading could be missed and its children leaked into
+            // the selected project.
             let stopY = Number.POSITIVE_INFINITY;
+            let stopProjectName = '';
 
             for (const el of Array.from(
                 entry.doc.querySelectorAll('a,span,td,div')
@@ -833,16 +843,17 @@ final class BrowserModel: ObservableObject {
                 const name = cleanName(textOf(el));
 
                 if (r.cy <= projectY + 3) continue;
-                if (r.left > projectX + 30) continue;
+                if (name === selectedProjectName) continue;
+                if (!knownProjectNames.has(name)) continue;
 
-                const looksLikeProject =
-                    /(事業|專案|项目|プロジェクト|請假|休暇)$/i.test(name);
+                // Project-directory headings live in the same left-side tree.
+                // Keep a generous horizontal allowance; exact-name matching is
+                // what makes the boundary safe.
+                if (r.left > projectX + 430) continue;
 
-                if (
-                    looksLikeProject &&
-                    name !== selectedProjectName
-                ) {
-                    stopY = Math.min(stopY, r.cy);
+                if (r.cy < stopY) {
+                    stopY = r.cy;
+                    stopProjectName = name;
                 }
             }
 
@@ -1303,6 +1314,7 @@ final class BrowserModel: ObservableObject {
                 tasks: final.slice(0, 400),
                 debug:
                     `tree:left ` +
+                    `stop:${stopProjectName || 'END'} ` +
                     `evidence:${evidence.length} ` +
                     `rows:${clusteredRows.length} ` +
                     `bars:${bars.length} ` +
@@ -1583,4 +1595,10 @@ final class BrowserModel: ObservableObject {
 
         return string
     }
+
+    private func jsonArrayLiteral(_ values: [String]) -> String {
+        let parts = values.map { jsonLiteral($0) }
+        return "[" + parts.joined(separator: ",") + "]"
+    }
+
 }
