@@ -3,6 +3,13 @@ import WebKit
 
 @MainActor
 final class BrowserModel: ObservableObject {
+    enum Section: String, Equatable {
+        case gantt
+        case schedule
+        case assignee
+        case home
+    }
+
     @Published var canGoBack = false
     @Published var canGoForward = false
     @Published var isLoading = false
@@ -14,6 +21,17 @@ final class BrowserModel: ObservableObject {
     @Published var needsLogin = true
     @Published var isSubmittingLogin = false
     @Published var loginMessage: String?
+
+    @Published var currentSection: Section = .gantt
+
+    var currentSectionTitle: String {
+        switch currentSection {
+        case .gantt: return "甘特圖"
+        case .schedule: return "日程"
+        case .assignee: return "負責狀況"
+        case .home: return "專案首頁"
+        }
+    }
 
     weak var webView: WKWebView?
 
@@ -31,13 +49,67 @@ final class BrowserModel: ObservableObject {
     func reload() { webView?.reload() }
 
     func load(_ url: URL) {
-        webView?.load(
-            URLRequest(
-                url: url,
-                cachePolicy: .useProtocolCachePolicy,
-                timeoutInterval: 60
-            )
-        )
+        webView?.load(URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 60))
+    }
+
+    func open(_ section: Section) {
+        guard let webView else { return }
+
+        let labels: [String]
+        switch section {
+        case .gantt:
+            labels = ["チャート", "甘特圖", "Gantt"]
+        case .schedule:
+            labels = ["カレンダー", "日程", "行事曆", "Calendar"]
+        case .assignee:
+            labels = ["担当状況", "負責狀況", "Assignee"]
+        case .home:
+            labels = ["トップページ", "首頁", "Home"]
+        }
+
+        let encoded = (try? String(data: JSONEncoder().encode(labels), encoding: .utf8)) ?? "[]"
+
+        let js = """
+        (function() {
+            const labels = \(encoded);
+            const nodes = Array.from(document.querySelectorAll('a,button,[onclick]'));
+
+            function normalized(v) {
+                return (v || '').replace(/\\s+/g, '').toLowerCase();
+            }
+
+            for (const label of labels) {
+                const needle = normalized(label);
+                const hit = nodes.find(el => {
+                    const blob = normalized([
+                        el.innerText,
+                        el.textContent,
+                        el.title,
+                        el.getAttribute('aria-label'),
+                        el.href
+                    ].join(' '));
+                    return blob.indexOf(needle) >= 0;
+                });
+
+                if (hit) {
+                    hit.click();
+                    return 'clicked';
+                }
+            }
+            return 'not-found';
+        })();
+        """
+
+        webView.evaluateJavaScript(js) { [weak self] result, _ in
+            Task { @MainActor in
+                guard let self else { return }
+                if (result as? String) == "clicked" {
+                    self.currentSection = section
+                } else {
+                    self.errorMessage = "找不到此功能入口，Brabio 頁面結構可能已變更。"
+                }
+            }
+        }
     }
 
     func submitLogin(account: String, password: String, remember: Bool, startURL: URL) {
@@ -50,12 +122,7 @@ final class BrowserModel: ObservableObject {
         loginMessage = nil
         isSubmittingLogin = true
         pendingSocialProvider = nil
-        pendingLogin = PendingLogin(
-            account: trimmed,
-            password: password,
-            remember: remember
-        )
-
+        pendingLogin = PendingLogin(account: trimmed, password: password, remember: remember)
         attemptPendingAction(startURL: startURL)
     }
 
@@ -99,7 +166,6 @@ final class BrowserModel: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 let state = result as? String ?? "other"
-
                 self.authCheckComplete = true
 
                 if state == "login" {
@@ -111,14 +177,66 @@ final class BrowserModel: ObservableObject {
                     self.loginMessage = nil
                     self.pendingLogin = nil
                     self.pendingSocialProvider = nil
+                    self.applyAppMode()
                 }
             }
         }
     }
 
-    private func attemptPendingAction(startURL: URL) {
+    private func applyAppMode() {
         guard let webView else { return }
 
+        let js = """
+        (function() {
+            try {
+                let meta = document.querySelector('meta[name="viewport"]');
+                if (!meta) {
+                    meta = document.createElement('meta');
+                    meta.name = 'viewport';
+                    document.head.appendChild(meta);
+                }
+                meta.content = 'width=device-width, initial-scale=1.0, maximum-scale=3.0, viewport-fit=cover';
+
+                let style = document.getElementById('itgs-app-mode-style');
+                if (!style) {
+                    style = document.createElement('style');
+                    style.id = 'itgs-app-mode-style';
+                    style.innerHTML = `
+                        html, body {
+                            margin: 0 !important;
+                            padding: 0 !important;
+                            overscroll-behavior: none !important;
+                            -webkit-tap-highlight-color: transparent !important;
+                        }
+                        ::-webkit-scrollbar { width: 0 !important; height: 0 !important; }
+                    `;
+                    document.head.appendChild(style);
+                }
+
+                const menuLabels = ['トップページ','チャート','カレンダー','担当状況','全画面','表示設定'];
+                const all = Array.from(document.querySelectorAll('a,button,span,div,td,li'));
+
+                const menuNodes = all.filter(el => {
+                    const t = (el.innerText || '').trim();
+                    return menuLabels.includes(t);
+                });
+
+                menuNodes.forEach(el => {
+                    const target = el.closest('li,td') || el;
+                    target.style.display = 'none';
+                });
+
+                return 'ok';
+            } catch(e) {
+                return 'error';
+            }
+        })();
+        """
+        webView.evaluateJavaScript(js)
+    }
+
+    private func attemptPendingAction(startURL: URL) {
+        guard let webView else { return }
         let hasPasswordJS = "document.querySelector('input[type=\"password\"]') !== null"
         webView.evaluateJavaScript(hasPasswordJS) { [weak self] result, _ in
             Task { @MainActor in
@@ -155,16 +273,11 @@ final class BrowserModel: ObservableObject {
                 if (!el) return false;
                 const s = window.getComputedStyle(el);
                 const r = el.getBoundingClientRect();
-                return s.display !== 'none' &&
-                       s.visibility !== 'hidden' &&
-                       !el.disabled &&
-                       r.width > 0 && r.height > 0;
+                return s.display !== 'none' && s.visibility !== 'hidden' && !el.disabled && r.width > 0 && r.height > 0;
             }
 
             function setNativeValue(el, value) {
-                const setter = Object.getOwnPropertyDescriptor(
-                    window.HTMLInputElement.prototype, 'value'
-                ).set;
+                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
                 setter.call(el, value);
                 el.dispatchEvent(new Event('input', { bubbles: true }));
                 el.dispatchEvent(new Event('change', { bubbles: true }));
@@ -172,12 +285,9 @@ final class BrowserModel: ObservableObject {
 
             const inputs = Array.from(document.querySelectorAll('input')).filter(visible);
             const passwordField = inputs.find(el => (el.type || '').toLowerCase() === 'password');
-
             const accountField =
                 inputs.find(el => {
-                    const blob = [
-                        el.name, el.id, el.placeholder, el.autocomplete, el.type
-                    ].join(' ').toLowerCase();
+                    const blob = [el.name, el.id, el.placeholder, el.autocomplete, el.type].join(' ').toLowerCase();
                     return el !== passwordField &&
                            ['text', 'email', ''].includes((el.type || '').toLowerCase()) &&
                            /(login|user|mail|email|account|id)/.test(blob);
@@ -187,9 +297,7 @@ final class BrowserModel: ObservableObject {
                     ['text', 'email', ''].includes((el.type || '').toLowerCase())
                 );
 
-            if (!accountField || !passwordField) {
-                return 'fields-not-found';
-            }
+            if (!accountField || !passwordField) return 'fields-not-found';
 
             setNativeValue(accountField, \(accountJSON));
             setNativeValue(passwordField, \(passwordJSON));
@@ -197,26 +305,17 @@ final class BrowserModel: ObservableObject {
             if (\(rememberJS)) {
                 const checkbox = inputs.find(el =>
                     (el.type || '').toLowerCase() === 'checkbox' &&
-                    /(remember|keep|save|login)/.test(
-                        [el.name, el.id, el.value].join(' ').toLowerCase()
-                    )
+                    /(remember|keep|save|login)/.test([el.name, el.id, el.value].join(' ').toLowerCase())
                 ) || inputs.find(el => (el.type || '').toLowerCase() === 'checkbox');
 
                 if (checkbox && !checkbox.checked) checkbox.click();
             }
 
-            const candidates = Array.from(
-                document.querySelectorAll('button, input[type="submit"], input[type="button"], a')
-            ).filter(visible);
-
+            const candidates = Array.from(document.querySelectorAll('button, input[type="submit"], input[type="button"], a')).filter(visible);
             const submit = candidates.find(el => {
-                const text = [
-                    el.innerText, el.value, el.title, el.getAttribute('aria-label')
-                ].join(' ').toLowerCase();
+                const text = [el.innerText, el.value, el.title, el.getAttribute('aria-label')].join(' ').toLowerCase();
                 return /(ログイン|login|sign in|登入)/.test(text);
-            }) || candidates.find(el =>
-                (el.type || '').toLowerCase() === 'submit'
-            );
+            }) || candidates.find(el => (el.type || '').toLowerCase() === 'submit');
 
             if (submit) {
                 submit.click();
@@ -224,9 +323,7 @@ final class BrowserModel: ObservableObject {
             }
 
             if (passwordField.form) {
-                passwordField.form.requestSubmit
-                    ? passwordField.form.requestSubmit()
-                    : passwordField.form.submit();
+                passwordField.form.requestSubmit ? passwordField.form.requestSubmit() : passwordField.form.submit();
                 return 'form-submitted';
             }
 
@@ -266,24 +363,14 @@ final class BrowserModel: ObservableObject {
                 if (!el) return false;
                 const s = window.getComputedStyle(el);
                 const r = el.getBoundingClientRect();
-                return s.display !== 'none' &&
-                       s.visibility !== 'hidden' &&
-                       r.width > 0 && r.height > 0;
+                return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 0 && r.height > 0;
             }
 
-            const nodes = Array.from(
-                document.querySelectorAll('a, button, input, img')
-            ).filter(visible);
+            const nodes = Array.from(document.querySelectorAll('a, button, input, img')).filter(visible);
 
             const hit = nodes.find(el => {
                 const text = [
-                    el.innerText,
-                    el.value,
-                    el.alt,
-                    el.title,
-                    el.href,
-                    el.src,
-                    el.getAttribute('aria-label')
+                    el.innerText, el.value, el.alt, el.title, el.href, el.src, el.getAttribute('aria-label')
                 ].join(' ').toLowerCase();
                 return text.indexOf(provider) >= 0;
             });
