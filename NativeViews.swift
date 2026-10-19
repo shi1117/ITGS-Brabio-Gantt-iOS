@@ -326,7 +326,7 @@ struct NativeGanttView: View {
             Text("尚未取得甘特圖資料")
                 .font(.headline)
 
-            Text("按右上角重新整理；如果 Brabio 頁面結構不同，下一版可再針對實際畫面調整抓取規則。")
+            Text("系統會自動重試讀取 Brabio。若仍抓不到，畫面上方會顯示偵測結果，方便直接調整解析規則。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
