@@ -20,27 +20,21 @@ struct WebView: UIViewRepresentable {
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
-        webView.allowsBackForwardNavigationGestures = true
+
+        webView.allowsBackForwardNavigationGestures = false
+        webView.allowsLinkPreview = false
         webView.scrollView.keyboardDismissMode = .interactive
         webView.scrollView.contentInsetAdjustmentBehavior = .never
-        webView.scrollView.refreshControl = UIRefreshControl()
-        webView.scrollView.refreshControl?.addTarget(
-            context.coordinator,
-            action: #selector(Coordinator.refresh(_:)),
-            for: .valueChanged
-        )
+        webView.scrollView.bounces = false
+        webView.scrollView.alwaysBounceVertical = false
+        webView.scrollView.alwaysBounceHorizontal = false
+        webView.backgroundColor = .white
+        webView.scrollView.backgroundColor = .white
 
         model.webView = webView
         context.coordinator.observe(webView)
 
-        webView.load(
-            URLRequest(
-                url: url,
-                cachePolicy: .useProtocolCachePolicy,
-                timeoutInterval: 60
-            )
-        )
-
+        webView.load(URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 60))
         return webView
     }
 
@@ -66,29 +60,19 @@ struct WebView: UIViewRepresentable {
         func observe(_ webView: WKWebView) {
             observations = [
                 webView.observe(\.estimatedProgress, options: [.new]) { [weak self] webView, _ in
-                    Task { @MainActor in
-                        self?.model.progress = webView.estimatedProgress
-                    }
+                    Task { @MainActor in self?.model.progress = webView.estimatedProgress }
                 },
                 webView.observe(\.canGoBack, options: [.new]) { [weak self] webView, _ in
-                    Task { @MainActor in
-                        self?.model.canGoBack = webView.canGoBack
-                    }
+                    Task { @MainActor in self?.model.canGoBack = webView.canGoBack }
                 },
                 webView.observe(\.canGoForward, options: [.new]) { [weak self] webView, _ in
-                    Task { @MainActor in
-                        self?.model.canGoForward = webView.canGoForward
-                    }
+                    Task { @MainActor in self?.model.canGoForward = webView.canGoForward }
                 },
                 webView.observe(\.isLoading, options: [.new]) { [weak self] webView, _ in
-                    Task { @MainActor in
-                        self?.model.isLoading = webView.isLoading
-                    }
+                    Task { @MainActor in self?.model.isLoading = webView.isLoading }
                 },
                 webView.observe(\.url, options: [.new]) { [weak self] webView, _ in
-                    Task { @MainActor in
-                        self?.model.currentURL = webView.url
-                    }
+                    Task { @MainActor in self?.model.currentURL = webView.url }
                 }
             ]
         }
@@ -97,40 +81,21 @@ struct WebView: UIViewRepresentable {
             observations.removeAll()
         }
 
-        @objc func refresh(_ sender: UIRefreshControl) {
-            model.webView?.reload()
-            sender.endRefreshing()
-        }
-
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            webView.scrollView.refreshControl?.endRefreshing()
-
             Task { @MainActor in
                 model.errorMessage = nil
                 model.handlePageFinished(startURL: startURL)
             }
         }
 
-        func webView(
-            _ webView: WKWebView,
-            didFail navigation: WKNavigation!,
-            withError error: Error
-        ) {
-            webView.scrollView.refreshControl?.endRefreshing()
-
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             Task { @MainActor in
                 model.errorMessage = error.localizedDescription
                 model.authCheckComplete = true
             }
         }
 
-        func webView(
-            _ webView: WKWebView,
-            didFailProvisionalNavigation navigation: WKNavigation!,
-            withError error: Error
-        ) {
-            webView.scrollView.refreshControl?.endRefreshing()
-
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             Task { @MainActor in
                 model.errorMessage = error.localizedDescription
                 model.authCheckComplete = true
