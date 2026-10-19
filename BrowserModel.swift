@@ -433,14 +433,8 @@ final class BrowserModel: ObservableObject {
         (function() {
             const selectedProjectName = \(projectNameJSON);
 
-            // Convert coordinates from nested frames into one common coordinate system.
             function collectDocs(root, offsetX = 0, offsetY = 0, depth = 0) {
-                const result = [{
-                    doc: root,
-                    offsetX,
-                    offsetY,
-                    depth
-                }];
+                const result = [{ doc: root, offsetX, offsetY, depth }];
 
                 for (const frame of Array.from(root.querySelectorAll('iframe,frame'))) {
                     try {
@@ -509,23 +503,6 @@ final class BrowserModel: ObservableObject {
                     .trim();
             }
 
-            function isBadTaskName(value) {
-                const name = cleanName(value);
-
-                if (name.length < 2 || name.length > 90) return true;
-                if (name === selectedProjectName) return true;
-                if (/^(トップページ|チャート|カレンダー|担当状況|全画面|表示設定|Brabio|ログアウト|ヘルプ)$/i.test(name)) return true;
-                if (/^(全員|全ての進捗|タスクを追加する)$/i.test(name)) return true;
-                if (/ログインユーザー|メンバー未設定/.test(name)) return true;
-                if (/^[0-9]+$/.test(name)) return true;
-                if (/^[0-9]{1,2}月[0-9]{1,2}日/.test(name)) return true;
-                if (/^20[0-9]{2}[\\/年.-]/.test(name)) return true;
-                if (/^[0-9]{1,3}%$/.test(name)) return true;
-                if (/@/.test(name)) return true;
-
-                return false;
-            }
-
             function rgb(color) {
                 const m = String(color || '')
                     .match(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)/);
@@ -549,10 +526,7 @@ final class BrowserModel: ObservableObject {
                 const c = rgb(color);
                 if (!c) return 0;
 
-                const maxV = Math.max(c.r, c.g, c.b);
-                const minV = Math.min(c.r, c.g, c.b);
-
-                return maxV - minV;
+                return Math.max(c.r, c.g, c.b) - Math.min(c.r, c.g, c.b);
             }
 
             function iso(date) {
@@ -562,57 +536,43 @@ final class BrowserModel: ObservableObject {
                 return `${y}-${m}-${d}`;
             }
 
-            function parseDate(value) {
-                const m = String(value || '').match(
-                    /(20\\d{2})[\\/年.\\-](\\d{1,2})[\\/月.\\-](\\d{1,2})/
-                );
+            function isMetadata(value) {
+                const text = cleanName(value);
 
-                if (!m) return null;
+                if (!text) return true;
+                if (/^\\d+\\s*営業日$/i.test(text)) return true;
+                if (/^\\d{1,2}\\/\\d{1,2}\\s*\\([^)]+\\)$/i.test(text)) return true;
+                if (/^\\d{1,2}月\\d{1,2}日(?:\\s*\\([^)]+\\))?$/i.test(text)) return true;
+                if (/^\\d{1,3}\\s*%$/i.test(text)) return true;
+                if (/^(登録|更新|期間|進捗|最終更新|メンバー|あしあと|内容|添付ファイル)$/i.test(text)) return true;
+                if (/ログインユーザー|メンバー未設定/.test(text)) return true;
+                if (/@/.test(text)) return true;
 
-                return new Date(
-                    Number(m[1]),
-                    Number(m[2]) - 1,
-                    Number(m[3])
-                );
+                return false;
             }
 
-            const allText = entries
-                .map(e => e.doc.body ? (e.doc.body.innerText || '') : '')
-                .join('\\n');
+            function isBadTaskName(value) {
+                const text = cleanName(value);
 
-            // -------- 1. Scope the task tree to the SELECTED project --------
-            // IMPORTANT:
-            // Never scan the whole Brabio page as one task list.
-            // Every project has its own expanded tree. We first locate the exact
-            // selected project row, then only keep the indented rows below it,
-            // stopping at the next project row at the same indentation level.
-            //
-            // This logic is generic. It works for 金日水塔專案, Side car-500kW事業,
-            // Control box projects, 2.5MW / 5MW, Row cooler, etc. No project is
-            // hard-coded here.
-            // -------- 1. Find the SELECTED PROJECT in the LEFT task tree --------
-            // The same project name also appears in Brabio's breadcrumb/detail pane.
-            // v1.4 sometimes picked that right-side breadcrumb, which is why member names,
-            // business-day counts and dates were incorrectly treated as tasks.
-            //
-            // v1.5 always chooses the LEFTMOST exact project-name hit first.
-            // -------- 1. Find the SELECTED PROJECT in the LEFT task tree --------
-            //
-            // v1.5 proved the correct project tree is found (tree:left),
-            // but labels:0 showed that Brabio does NOT expose these task names
-            // as plain <a> / [onclick] elements. Its old UI uses delegated click
-            // handlers / nested table cells.
-            //
-            // v1.6 therefore reads VISUAL ROW TEXT from the selected project's
-            // left tree only, then keeps one atomic label per row.
+                if (text.length < 2 || text.length > 100) return true;
+                if (text === selectedProjectName) return true;
+                if (isMetadata(text)) return true;
+                if (/^(ITG|Brabio)$/i.test(text)) return true;
+                if (/ブラビオへようこそ|トップページ/.test(text)) return true;
+                if (/^(チャート|カレンダー|担当状況|全画面|表示設定)$/i.test(text)) return true;
+                if (/^(全員|全ての進捗|タスクを追加する)$/i.test(text)) return true;
+                if (/^[0-9]+$/.test(text)) return true;
+
+                return false;
+            }
+
+            // 1) Locate the selected project in the LEFT project tree.
             let projectMarker = null;
 
             for (const entry of entries) {
-                const nodes = Array.from(
+                for (const el of Array.from(
                     entry.doc.querySelectorAll('a,span,td,div')
-                );
-
-                for (const el of nodes) {
+                )) {
                     if (!visible(entry, el)) continue;
 
                     const r = rectFor(entry, el);
@@ -622,7 +582,6 @@ final class BrowserModel: ObservableObject {
 
                     const area = r.width * r.height;
 
-                    // Exact project-name hit furthest to the LEFT wins.
                     if (
                         projectMarker === null ||
                         r.left < projectMarker.r.left - 8 ||
@@ -635,338 +594,228 @@ final class BrowserModel: ObservableObject {
                             entry,
                             el,
                             r,
-                            area,
-                            name
+                            area
                         };
                     }
                 }
             }
 
-            let labels = [];
-            let rawTreeRows = 0;
+            if (!projectMarker) {
+                return {
+                    tasks: [],
+                    debug: 'tree:none evidence:0 rows:0 bars:0 names:0 dates:0'
+                };
+            }
 
-            if (projectMarker !== null) {
-                const entry = projectMarker.entry;
-                const projectX = projectMarker.r.left;
-                const projectY = projectMarker.r.cy;
+            const entry = projectMarker.entry;
+            const projectX = projectMarker.r.left;
+            const projectY = projectMarker.r.cy;
 
-                // The Brabio project tree is the narrow pane on the left.
-                // Keep all extraction inside the SAME frame/document as the marker.
-                const treeLeft = Math.max(entry.offsetX, projectX - 40);
-                const treeRight = projectX + 430;
+            // Find next sibling project so we only inspect this project's rows.
+            let stopY = Number.POSITIVE_INFINITY;
 
-                // Find next top-level project row. That is the end of this project's
-                // children. We deliberately use the same frame only.
-                let stopY = Number.POSITIVE_INFINITY;
+            for (const el of Array.from(
+                entry.doc.querySelectorAll('a,span,td,div')
+            )) {
+                if (!visible(entry, el)) continue;
 
-                const allTreeNodes = Array.from(
-                    entry.doc.querySelectorAll('a,span,td,div')
-                );
+                const r = rectFor(entry, el);
+                const name = cleanName(textOf(el));
 
-                for (const el of allTreeNodes) {
-                    if (!visible(entry, el)) continue;
+                if (r.cy <= projectY + 3) continue;
+                if (r.left > projectX + 30) continue;
 
-                    const r = rectFor(entry, el);
-                    const name = cleanName(textOf(el));
+                const looksLikeProject =
+                    /(事業|專案|项目|プロジェクト|請假|休暇)$/i.test(name);
 
-                    if (r.cy <= projectY + 3) continue;
-                    if (r.left < treeLeft || r.left > projectX + 28) continue;
-
-                    const looksLikeProject =
-                        /(事業|專案|项目|プロジェクト|請假|休暇)$/i.test(name);
-
-                    if (
-                        looksLikeProject &&
-                        name !== selectedProjectName
-                    ) {
-                        stopY = Math.min(stopY, r.cy);
-                    }
+                if (
+                    looksLikeProject &&
+                    name !== selectedProjectName
+                ) {
+                    stopY = Math.min(stopY, r.cy);
                 }
+            }
 
-                function isMetadata(value) {
-                    const name = cleanName(value);
+            const treeRight = projectX + 430;
 
-                    if (!name) return true;
-                    if (/^\\d+\\s*営業日$/i.test(name)) return true;
-                    if (/^\\d{1,2}\\/\\d{1,2}\\s*\\([^)]+\\)$/i.test(name)) return true;
-                    if (/^\\d{1,2}月\\d{1,2}日(?:\\s*\\([^)]+\\))?$/i.test(name)) return true;
-                    if (/^\\d{1,3}\\s*%$/i.test(name)) return true;
-                    if (/^(登録|更新|期間|進捗|最終更新|メンバー|あしあと|内容|添付ファイル)$/i.test(name)) return true;
-                    if (/@/.test(name)) return true;
+            // 2) Detect the metadata the user pointed out:
+            //    "59営業日", "10/30(金)", "87%" ...
+            //    These values tell us WHICH VISUAL ROW is a real task row.
+            const evidence = [];
 
-                    return false;
-                }
+            for (const el of Array.from(
+                entry.doc.querySelectorAll('span,td,div,a')
+            )) {
+                if (!visible(entry, el)) continue;
 
-                const candidates = [];
+                const r = rectFor(entry, el);
 
-                for (const el of allTreeNodes) {
-                    if (!visible(entry, el)) continue;
+                if (r.cy <= projectY + 3 || r.cy >= stopY - 2) continue;
+                if (r.height < 8 || r.height > 48) continue;
 
-                    const r = rectFor(entry, el);
-                    const name = cleanName(textOf(el));
+                const text = textOf(el);
 
-                    if (r.cy <= projectY + 3 || r.cy >= stopY - 2) continue;
-                    if (r.left < treeLeft || r.left > treeRight) continue;
-                    if (r.width < 12 || r.width > 430) continue;
-                    if (r.height < 9 || r.height > 48) continue;
-                    if (isBadTaskName(name)) continue;
-                    if (isMetadata(name)) continue;
+                const progressMatch = text.match(/(?:^|\\s)(\\d{1,3})\\s*%(?:\\s|$)/);
+                const businessMatch = text.match(/(?:^|\\s)(\\d+)\\s*営業日(?:\\s|$)/);
+                const dateMatch = text.match(/(?:^|\\s)(\\d{1,2}\\/\\d{1,2})\\s*\\([^)]+\\)(?:\\s|$)/);
 
-                    // Exclude another project heading that happens to be nested.
-                    if (
-                        /(事業|專案|项目|プロジェクト|請假|休暇)$/i.test(name) &&
-                        r.left <= projectX + 26
-                    ) {
-                        continue;
-                    }
+                if (!progressMatch && !businessMatch && !dateMatch) continue;
 
-                    // Reject container elements whose text is made of multiple visible
-                    // child labels. Keep the "atomic" text node for that row.
-                    const visibleChildren = Array.from(el.children || [])
-                        .filter(child => visible(entry, child))
-                        .map(child => cleanName(textOf(child)))
-                        .filter(t => t && !isMetadata(t));
+                // Ignore giant parent containers containing many rows.
+                if (r.width > 900 && r.height > 35) continue;
 
-                    const distinctChildTexts = Array.from(
-                        new Set(visibleChildren)
-                    );
-
-                    const isContainer =
-                        distinctChildTexts.length >= 2 &&
-                        distinctChildTexts.some(t => t !== name);
-
-                    if (isContainer) continue;
-
-                    const clickable =
-                        el.tagName === 'A' ||
-                        el.hasAttribute('onclick') ||
-                        !!el.closest('a,[onclick]');
-
-                    candidates.push({
-                        entry,
-                        el,
-                        name,
-                        r,
-                        clickable,
-                        area: r.width * r.height,
-                        quality: clickable ? 3 : 1
-                    });
-                }
-
-                rawTreeRows = candidates.length;
-
-                // Group by visual row. Brabio creates several nested DOM elements for
-                // the same row; choose the best candidate from each row.
-                candidates.sort((a, b) => {
-                    if (Math.abs(a.r.cy - b.r.cy) > 3) {
-                        return a.r.cy - b.r.cy;
-                    }
-
-                    if (a.quality !== b.quality) {
-                        return b.quality - a.quality;
-                    }
-
-                    // Prefer the smaller atomic text box.
-                    return a.area - b.area;
+                evidence.push({
+                    r,
+                    text,
+                    progress: progressMatch
+                        ? Math.max(0, Math.min(100, Number(progressMatch[1])))
+                        : null,
+                    businessDays: businessMatch
+                        ? Number(businessMatch[1])
+                        : null,
+                    dateText: dateMatch
+                        ? dateMatch[1]
+                        : null
                 });
-
-                const rowGroups = [];
-
-                for (const item of candidates) {
-                    let group = rowGroups.find(g =>
-                        Math.abs(g.cy - item.r.cy) <= 7
-                    );
-
-                    if (!group) {
-                        group = {
-                            cy: item.r.cy,
-                            items: []
-                        };
-                        rowGroups.push(group);
-                    }
-
-                    group.items.push(item);
-                }
-
-                for (const group of rowGroups) {
-                    const items = group.items
-                        .filter(item => !isMetadata(item.name))
-                        .sort((a, b) => {
-                            if (a.quality !== b.quality) {
-                                return b.quality - a.quality;
-                            }
-
-                            // Prefer the visually indented child text, then smaller area.
-                            if (Math.abs(a.r.left - b.r.left) > 8) {
-                                return b.r.left - a.r.left;
-                            }
-
-                            return a.area - b.area;
-                        });
-
-                    if (!items.length) continue;
-
-                    const chosen = items[0];
-
-                    // Final hard filters for known non-task labels.
-                    if (chosen.name === selectedProjectName) continue;
-                    if (/^(ITG|Brabio)$/i.test(chosen.name)) continue;
-                    if (/ブラビオへようこそ|トップページ/.test(chosen.name)) continue;
-                    if (/全画面表示設定|チャート|カレンダー|担当状況/.test(chosen.name)) continue;
-
-                    labels.push(chosen);
-                }
             }
 
-            labels.sort((a, b) => a.r.cy - b.r.cy);
+            // 3) Find painted Gantt bars. Their own text/title is the strongest
+            //    source for the task name ("程式設計:韌體", "靜態檢驗SOP", etc.).
+            const bars = [];
+            const w = winFor(entry);
 
-            // -------- 2. Find real Gantt bars --------
-            let bars = [];
+            for (const el of Array.from(entry.doc.querySelectorAll('*'))) {
+                if (!visible(entry, el)) continue;
 
-            for (const entry of entries) {
-                const w = winFor(entry);
+                const r = rectFor(entry, el);
 
-                for (const el of Array.from(entry.doc.querySelectorAll('*'))) {
-                    if (!visible(entry, el)) continue;
+                if (r.cy <= projectY + 3 || r.cy >= stopY - 2) continue;
+                if (r.width < 16) continue;
+                if (r.height < 5 || r.height > 36) continue;
 
-                    const r = rectFor(entry, el);
+                const style = w.getComputedStyle(el);
+                const bg = style.backgroundColor || '';
+                const bgImage = style.backgroundImage || '';
+                const marker = [
+                    el.id,
+                    typeof el.className === 'string' ? el.className : '',
+                    el.getAttribute('name') || '',
+                    el.getAttribute('title') || ''
+                ].join(' ').toLowerCase();
 
-                    if (r.width < 12) continue;
-                    if (r.height < 5 || r.height > 34) continue;
+                const painted =
+                    (
+                        bg &&
+                        bg !== 'rgba(0, 0, 0, 0)' &&
+                        bg !== 'transparent' &&
+                        brightness(bg) < 245
+                    ) ||
+                    (
+                        bgImage &&
+                        bgImage !== 'none'
+                    ) ||
+                    /gantt|task|bar|schedule|progress/.test(marker);
 
-                    const style = w.getComputedStyle(el);
-                    const marker = [
-                        el.id,
-                        typeof el.className === 'string' ? el.className : '',
-                        el.getAttribute('name') || '',
-                        el.getAttribute('title') || ''
-                    ].join(' ').toLowerCase();
+                if (!painted) continue;
 
-                    const bg = style.backgroundColor || '';
-                    const bgImage = style.backgroundImage || '';
-
-                    const painted =
-                        (
-                            bg &&
-                            bg !== 'rgba(0, 0, 0, 0)' &&
-                            bg !== 'transparent' &&
-                            brightness(bg) < 247
-                        ) ||
-                        (
-                            bgImage &&
-                            bgImage !== 'none'
-                        ) ||
-                        /gantt|task|bar|schedule|progress/.test(marker);
-
-                    if (!painted) continue;
-
-                    // Ignore common borders/grid cells.
-                    if (
-                        saturation(bg) < 8 &&
-                        brightness(bg) > 225 &&
-                        !/gantt|task|bar|progress/.test(marker)
-                    ) {
-                        continue;
-                    }
-
-                    bars.push({
-                        entry,
-                        el,
-                        r,
-                        bg,
-                        sat: saturation(bg),
-                        marker
-                    });
+                // Skip pale grid/background cells.
+                if (
+                    saturation(bg) < 8 &&
+                    brightness(bg) > 225 &&
+                    !/gantt|task|bar|progress/.test(marker)
+                ) {
+                    continue;
                 }
+
+                const textCandidates = [
+                    textOf(el),
+                    el.getAttribute('title') || '',
+                    el.getAttribute('alt') || '',
+                    el.getAttribute('aria-label') || '',
+                    el.getAttribute('data-title') || '',
+                    el.getAttribute('data-name') || ''
+                ]
+                .map(cleanName)
+                .filter(t => !isBadTaskName(t));
+
+                bars.push({
+                    el,
+                    r,
+                    sat: saturation(bg),
+                    name: textCandidates[0] || ''
+                });
             }
 
-            // -------- 3. Build date anchors from Brabio's actual header --------
-            // This is more reliable than assuming the visible month.
+            // 4) Date anchors for converting bar X position to dates.
             const dateAnchors = [];
 
-            for (const entry of entries) {
-                const monthNodes = [];
+            const monthNodes = [];
 
-                for (const el of Array.from(
-                    entry.doc.querySelectorAll('div,span,td,th')
-                )) {
-                    if (!visible(entry, el)) continue;
+            for (const el of Array.from(
+                entry.doc.querySelectorAll('div,span,td,th')
+            )) {
+                if (!visible(entry, el)) continue;
 
-                    const t = textOf(el);
-                    const m = t.match(/^(20\\d{2})年(\\d{1,2})月$/);
+                const text = textOf(el);
+                const m = text.match(/^(20\\d{2})年(\\d{1,2})月$/);
 
-                    if (!m) continue;
+                if (!m) continue;
 
-                    monthNodes.push({
-                        r: rectFor(entry, el),
-                        year: Number(m[1]),
-                        month: Number(m[2])
-                    });
-                }
+                monthNodes.push({
+                    r: rectFor(entry, el),
+                    year: Number(m[1]),
+                    month: Number(m[2])
+                });
+            }
 
-                const dayNodes = [];
+            for (const el of Array.from(
+                entry.doc.querySelectorAll('div,span,td,th')
+            )) {
+                if (!visible(entry, el)) continue;
 
-                for (const el of Array.from(
-                    entry.doc.querySelectorAll('div,span,td,th')
-                )) {
-                    if (!visible(entry, el)) continue;
+                const text = textOf(el);
 
-                    const t = textOf(el);
+                if (!/^(?:[1-9]|[12]\\d|3[01])$/.test(text)) continue;
 
-                    if (!/^(?:[1-9]|[12]\\d|3[01])$/.test(t)) continue;
+                const r = rectFor(entry, el);
 
-                    const r = rectFor(entry, el);
+                if (r.width < 8 || r.width > 70) continue;
+                if (r.height < 8 || r.height > 55) continue;
 
-                    if (r.width < 8 || r.width > 70) continue;
-                    if (r.height < 8 || r.height > 55) continue;
+                let bestMonth = null;
+                let bestScore = Number.POSITIVE_INFINITY;
 
-                    dayNodes.push({
-                        r,
-                        day: Number(t)
-                    });
-                }
+                for (const month of monthNodes) {
+                    const contains =
+                        r.cx >= month.r.left - 20 &&
+                        r.cx <= month.r.right + 20;
 
-                for (const day of dayNodes) {
-                    let bestMonth = null;
-                    let bestScore = Number.POSITIVE_INFINITY;
+                    const distance = Math.abs(r.cx - month.r.cx);
 
-                    for (const month of monthNodes) {
-                        const contains =
-                            day.r.cx >= month.r.left - 20 &&
-                            day.r.cx <= month.r.right + 20;
+                    const score = contains
+                        ? distance * 0.2
+                        : distance + 1000;
 
-                        const distance = Math.abs(
-                            day.r.cx - month.r.cx
-                        );
-
-                        const score = contains
-                            ? distance * 0.2
-                            : distance + 1000;
-
-                        if (score < bestScore) {
-                            bestScore = score;
-                            bestMonth = month;
-                        }
+                    if (score < bestScore) {
+                        bestScore = score;
+                        bestMonth = month;
                     }
+                }
 
-                    if (!bestMonth) continue;
+                if (!bestMonth) continue;
 
-                    const date = new Date(
+                dateAnchors.push({
+                    x: r.cx,
+                    date: new Date(
                         bestMonth.year,
                         bestMonth.month - 1,
-                        day.day
-                    );
-
-                    dateAnchors.push({
-                        x: day.r.cx,
-                        date
-                    });
-                }
+                        Number(text)
+                    )
+                });
             }
 
             dateAnchors.sort((a, b) => a.x - b.x);
 
-            // Remove duplicated day-label descendants.
             const compactAnchors = [];
 
             for (const anchor of dateAnchors) {
@@ -979,145 +828,203 @@ final class BrowserModel: ObservableObject {
             }
 
             function dateFromX(x) {
-                if (compactAnchors.length >= 2) {
-                    let closest = compactAnchors[0];
-
-                    for (const a of compactAnchors) {
-                        if (Math.abs(a.x - x) < Math.abs(closest.x - x)) {
-                            closest = a;
-                        }
-                    }
-
-                    const distances = [];
-
-                    for (let i = 1; i < compactAnchors.length; i++) {
-                        const dx = compactAnchors[i].x - compactAnchors[i - 1].x;
-                        const dd = (
-                            compactAnchors[i].date.getTime() -
-                            compactAnchors[i - 1].date.getTime()
-                        ) / 86400000;
-
-                        if (dx > 5 && Math.abs(dd) >= 1 && Math.abs(dd) <= 3) {
-                            distances.push(dx / dd);
-                        }
-                    }
-
-                    let pxPerDay = 30;
-
-                    if (distances.length) {
-                        distances.sort((a, b) => a - b);
-                        pxPerDay = distances[Math.floor(distances.length / 2)];
-                    }
-
-                    const dayOffset = Math.round(
-                        (x - closest.x) / pxPerDay
-                    );
-
-                    const d = new Date(closest.date);
-                    d.setDate(d.getDate() + dayOffset);
-
-                    return d;
+                if (compactAnchors.length < 2) {
+                    return new Date();
                 }
 
-                // Header not found: try project-wide date text.
-                const explicitDates = Array.from(
-                    allText.matchAll(
-                        /20\\d{2}[\\/年.\\-]\\d{1,2}[\\/月.\\-]\\d{1,2}/g
-                    )
-                )
-                .map(x => parseDate(x[0]))
-                .filter(Boolean);
+                let closest = compactAnchors[0];
 
-                if (explicitDates.length) {
-                    explicitDates.sort((a, b) => a - b);
-                    return explicitDates[0];
+                for (const anchor of compactAnchors) {
+                    if (
+                        Math.abs(anchor.x - x) <
+                        Math.abs(closest.x - x)
+                    ) {
+                        closest = anchor;
+                    }
                 }
 
-                return new Date();
+                const spacings = [];
+
+                for (let i = 1; i < compactAnchors.length; i++) {
+                    const dx =
+                        compactAnchors[i].x -
+                        compactAnchors[i - 1].x;
+
+                    const dd = (
+                        compactAnchors[i].date.getTime() -
+                        compactAnchors[i - 1].date.getTime()
+                    ) / 86400000;
+
+                    if (
+                        dx > 5 &&
+                        Math.abs(dd) >= 1 &&
+                        Math.abs(dd) <= 3
+                    ) {
+                        spacings.push(dx / dd);
+                    }
+                }
+
+                let pxPerDay = 30;
+
+                if (spacings.length) {
+                    spacings.sort((a, b) => a - b);
+                    pxPerDay =
+                        spacings[Math.floor(spacings.length / 2)];
+                }
+
+                const offset = Math.round(
+                    (x - closest.x) / pxPerDay
+                );
+
+                const result = new Date(closest.date);
+                result.setDate(result.getDate() + offset);
+
+                return result;
             }
 
-            // -------- 4. Pair each task label with a bar on the same row --------
+            // 5) Create rows from metadata OR bars.
+            //    Then choose task name in this priority:
+            //      A. text printed inside the progress bar
+            //      B. left task-tree text on the exact same Y row
+            //    Metadata itself is NEVER used as the task name.
+            const rowCenters = [];
+
+            for (const item of evidence) {
+                rowCenters.push(item.r.cy);
+            }
+
+            for (const bar of bars) {
+                if (!rowCenters.some(y => Math.abs(y - bar.r.cy) <= 8)) {
+                    rowCenters.push(bar.r.cy);
+                }
+            }
+
+            rowCenters.sort((a, b) => a - b);
+
+            const clusteredRows = [];
+
+            for (const y of rowCenters) {
+                const existing = clusteredRows.find(row =>
+                    Math.abs(row.y - y) <= 8
+                );
+
+                if (existing) {
+                    existing.values.push(y);
+                    existing.y =
+                        existing.values.reduce((a, b) => a + b, 0) /
+                        existing.values.length;
+                } else {
+                    clusteredRows.push({
+                        y,
+                        values: [y]
+                    });
+                }
+            }
+
             const results = [];
 
-            for (const label of labels) {
-                const nearbyBars = bars
-                    .filter(bar =>
-                        Math.abs(bar.r.cy - label.r.cy) <= 16 &&
-                        bar.r.left >= label.r.right - 5
-                    )
+            for (const row of clusteredRows) {
+                const y = row.y;
+
+                const rowEvidence = evidence.filter(item =>
+                    Math.abs(item.r.cy - y) <= 12
+                );
+
+                const progressEvidence =
+                    rowEvidence.find(item => item.progress !== null);
+
+                const businessEvidence =
+                    rowEvidence.find(item => item.businessDays !== null);
+
+                const rowBars = bars
+                    .filter(bar => Math.abs(bar.r.cy - y) <= 14)
                     .sort((a, b) => {
-                        // Prefer colored Brabio bars over gray background rails.
+                        // Prefer bar with a real printed name.
+                        if (!!a.name !== !!b.name) {
+                            return a.name ? -1 : 1;
+                        }
+
+                        // Then prefer more saturated colored bars.
                         if (Math.abs(a.sat - b.sat) > 4) {
                             return b.sat - a.sat;
                         }
 
-                        // Then prefer a reasonable task-bar width.
-                        const aPenalty = a.r.width > 1200 ? 500 : 0;
-                        const bPenalty = b.r.width > 1200 ? 500 : 0;
-
-                        return (
-                            (a.r.left - label.r.right) + aPenalty
-                        ) - (
-                            (b.r.left - label.r.right) + bPenalty
-                        );
+                        return b.r.width - a.r.width;
                     });
 
-                const bar = nearbyBars[0] || null;
+                const bar = rowBars[0] || null;
 
-                const labelContainer =
-                    label.el.closest('tr,[role="row"],li') ||
-                    label.el.parentElement;
+                let name = '';
 
-                let context = textOf(labelContainer || label.el);
+                // A) Name printed inside progress bar.
+                for (const candidate of rowBars) {
+                    if (!candidate.name) continue;
 
-                if (labelContainer) {
-                    context += ' ' + Array.from(
-                        labelContainer.attributes || []
-                    ).map(a => a.value).join(' ');
+                    name = candidate.name;
+                    break;
                 }
 
-                // Add nearby percentage / assignee text from the same visual row.
-                for (const entry of entries) {
-                    for (const node of Array.from(
-                        entry.doc.querySelectorAll('span,td,div,a')
+                // B) If the bar has no text, find the left-tree label on same row.
+                if (!name) {
+                    const candidates = [];
+
+                    for (const el of Array.from(
+                        entry.doc.querySelectorAll('a,span,td,div')
                     )) {
-                        if (!visible(entry, node)) continue;
+                        if (!visible(entry, el)) continue;
 
-                        const r = rectFor(entry, node);
+                        const r = rectFor(entry, el);
 
-                        if (Math.abs(r.cy - label.r.cy) > 13) continue;
+                        if (Math.abs(r.cy - y) > 9) continue;
+                        if (r.left < projectX || r.left > treeRight) continue;
+                        if (r.width < 12 || r.width > 430) continue;
+                        if (r.height < 9 || r.height > 48) continue;
 
-                        const t = textOf(node);
+                        const text = cleanName(textOf(el));
 
-                        if (
-                            /\\d{1,3}\\s*%/.test(t) ||
-                            /[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/i.test(t)
-                        ) {
-                            context += ' ' + t;
-                        }
+                        if (isBadTaskName(text)) continue;
+
+                        const visibleChildren = Array.from(el.children || [])
+                            .filter(child => visible(entry, child))
+                            .map(child => cleanName(textOf(child)))
+                            .filter(t => t && !isMetadata(t));
+
+                        const container =
+                            Array.from(new Set(visibleChildren))
+                                .filter(t => t !== text)
+                                .length >= 2;
+
+                        if (container) continue;
+
+                        candidates.push({
+                            text,
+                            r,
+                            area: r.width * r.height
+                        });
                     }
+
+                    candidates.sort((a, b) => {
+                        // More indented child text first, then smaller box.
+                        if (Math.abs(a.r.left - b.r.left) > 8) {
+                            return b.r.left - a.r.left;
+                        }
+
+                        return a.area - b.area;
+                    });
+
+                    name = candidates[0]?.text || '';
                 }
 
-                const explicitDates = Array.from(
-                    context.matchAll(
-                        /20\\d{2}[\\/年.\\-]\\d{1,2}[\\/月.\\-]\\d{1,2}/g
-                    )
-                )
-                .map(x => parseDate(x[0]))
-                .filter(Boolean);
+                if (!name || isBadTaskName(name)) continue;
 
-                let startDate = null;
-                let endDate = null;
+                let startDate;
+                let endDate;
 
-                if (explicitDates.length >= 1) {
-                    startDate = explicitDates[0];
-                    endDate = explicitDates[1] || explicitDates[0];
-                } else if (bar) {
+                if (bar) {
                     startDate = dateFromX(bar.r.left);
                     endDate = dateFromX(bar.r.right);
                 } else {
-                    // Keep the task visible even when Brabio has no painted bar.
-                    startDate = dateFromX(label.r.right + 40);
+                    startDate = new Date();
                     endDate = startDate;
                 }
 
@@ -1125,34 +1032,48 @@ final class BrowserModel: ObservableObject {
                     endDate = startDate;
                 }
 
-                const progressMatch = context.match(/(\\d{1,3})\\s*%/);
-
-                const progress = progressMatch
-                    ? Math.max(
-                        0,
-                        Math.min(100, Number(progressMatch[1]))
-                    )
+                const progress = progressEvidence
+                    ? progressEvidence.progress
                     : 0;
 
-                const emailMatch = context.match(
-                    /[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/i
-                );
+                // Assignee is secondary information; only read email on the same row.
+                let assignee = '未指定';
 
-                let assignee = emailMatch
-                    ? emailMatch[0]
-                    : '未指定';
+                for (const el of Array.from(
+                    entry.doc.querySelectorAll('span,td,div,a')
+                )) {
+                    if (!visible(entry, el)) continue;
+
+                    const r = rectFor(entry, el);
+
+                    if (Math.abs(r.cy - y) > 12) continue;
+                    if (r.left <= treeRight) continue;
+
+                    const text = textOf(el);
+                    const email = text.match(
+                        /[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/i
+                    );
+
+                    if (email) {
+                        assignee = email[0];
+                        break;
+                    }
+                }
 
                 results.push({
-                    name: label.name,
+                    name,
                     start: iso(startDate),
                     end: iso(endDate),
                     progress,
                     assignee,
-                    y: label.r.cy
+                    y,
+                    businessDays: businessEvidence
+                        ? businessEvidence.businessDays
+                        : null
                 });
             }
 
-            // -------- 5. Final visual-row de-duplication --------
+            // De-duplicate only the same name on the same visual row.
             results.sort((a, b) => a.y - b.y);
 
             const final = [];
@@ -1171,11 +1092,11 @@ final class BrowserModel: ObservableObject {
             return {
                 tasks: final.slice(0, 400),
                 debug:
-                    `frames:${entries.length - 1} ` +
-                    `tree:${projectMarker ? 'left' : 'none'} ` +
-                    `raw:${rawTreeRows} ` +
-                    `labels:${labels.length} ` +
+                    `tree:left ` +
+                    `evidence:${evidence.length} ` +
+                    `rows:${clusteredRows.length} ` +
                     `bars:${bars.length} ` +
+                    `names:${final.length} ` +
                     `dates:${compactAnchors.length}`
             };
         })();
