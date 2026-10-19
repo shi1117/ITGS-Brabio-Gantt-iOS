@@ -250,14 +250,10 @@ final class BrowserModel: ObservableObject {
         }
 
         let nameLiteral = jsonLiteral(project.name)
-        let allProjectNamesJSON = jsonArrayLiteral(projects.map(\.name))
-        let attemptValue = attempt
 
         let js = """
         (function() {
             const targetName = \(nameLiteral);
-            const knownProjectNames = new Set(\(allProjectNamesJSON));
-            const attempt = \(attemptValue);
 
             function collectDocs(root, offsetX = 0, offsetY = 0) {
                 const out = [{ doc: root, offsetX, offsetY }];
@@ -318,46 +314,25 @@ final class BrowserModel: ObservableObject {
             const entries = collectDocs(document);
             let marker = null;
 
-            // Build exact left-side markers for every project in the native directory.
-            const markers = [];
-
             for (const entry of entries) {
                 for (const el of Array.from(
                     entry.doc.querySelectorAll('a,span,td,div')
                 )) {
                     if (!visible(entry, el)) continue;
-
-                    const name = text(el);
-
-                    if (!knownProjectNames.has(name)) continue;
+                    if (text(el) !== targetName) continue;
 
                     const r = rect(entry, el);
                     const area = r.width * r.height;
 
-                    markers.push({
-                        name,
-                        entry,
-                        el,
-                        r,
-                        area
-                    });
-
-                    if (name === targetName) {
-                        if (
-                            marker === null ||
-                            r.left < marker.r.left - 8 ||
-                            (
-                                Math.abs(r.left - marker.r.left) <= 8 &&
-                                area < marker.area
-                            )
-                        ) {
-                            marker = {
-                                entry,
-                                el,
-                                r,
-                                area
-                            };
-                        }
+                    if (
+                        marker === null ||
+                        r.left < marker.r.left - 8 ||
+                        (
+                            Math.abs(r.left - marker.r.left) <= 8 &&
+                            area < marker.area
+                        )
+                    ) {
+                        marker = { entry, el, r, area };
                     }
                 }
             }
@@ -365,9 +340,7 @@ final class BrowserModel: ObservableObject {
             if (!marker) {
                 return {
                     status: 'project-not-found',
-                    expanded: false,
-                    children: 0,
-                    collapsedOthers: 0
+                    expanded: false
                 };
             }
 
@@ -375,45 +348,41 @@ final class BrowserModel: ObservableObject {
             const projectX = marker.r.left;
             const projectY = marker.r.cy;
 
-            // Deduplicate project markers by exact name, preferring the leftmost/smallest.
-            const bestByName = new Map();
+            // Determine whether task rows are already visible directly below this project.
+            let hasChildren = false;
 
-            for (const item of markers) {
-                const prev = bestByName.get(item.name);
+            for (const el of Array.from(
+                entry.doc.querySelectorAll('a,span,td,div')
+            )) {
+                if (!visible(entry, el)) continue;
 
-                if (
-                    !prev ||
-                    item.r.left < prev.r.left - 8 ||
-                    (
-                        Math.abs(item.r.left - prev.r.left) <= 8 &&
-                        item.area < prev.area
-                    )
-                ) {
-                    bestByName.set(item.name, item);
-                }
+                const r = rect(entry, el);
+                const t = text(el);
+
+                if (r.cy <= projectY + 4 || r.cy > projectY + 900) continue;
+                if (r.left < projectX + 10 || r.left > projectX + 430) continue;
+                if (r.height < 8 || r.height > 48) continue;
+                if (!t || t.length < 2 || t.length > 100) continue;
+
+                hasChildren = true;
+                break;
             }
 
-            const projectRows = Array.from(bestByName.values())
-                .filter(item => item.entry.doc === entry.doc)
-                .sort((a, b) => a.r.cy - b.r.cy);
+            let clickedExpand = false;
 
-            function findTreeToggle(projectItem) {
-                const px = projectItem.r.left;
-                const py = projectItem.r.cy;
-                const possible = [];
+            if (!hasChildren) {
+                const controls = [];
 
                 for (const el of Array.from(
-                    projectItem.entry.doc.querySelectorAll(
-                        'img,a,button,input,span,div'
-                    )
+                    entry.doc.querySelectorAll('img,a,button,input,span,div')
                 )) {
-                    if (!visible(projectItem.entry, el)) continue;
+                    if (!visible(entry, el)) continue;
 
-                    const r = rect(projectItem.entry, el);
+                    const r = rect(entry, el);
 
-                    if (Math.abs(r.cy - py) > 16) continue;
-                    if (r.right > px + 10) continue;
-                    if (r.left < px - 120) continue;
+                    if (Math.abs(r.cy - projectY) > 16) continue;
+                    if (r.right > projectX + 10) continue;
+                    if (r.left < projectX - 120) continue;
                     if (r.width < 6 || r.width > 42) continue;
                     if (r.height < 6 || r.height > 42) continue;
 
@@ -429,140 +398,52 @@ final class BrowserModel: ObservableObject {
 
                     let score = 0;
 
-                    if (/(minus|collapse|opened|tree.*minus)/i.test(blob)) {
-                        score += 130;
+                    if (/(plus|expand|closed|tree.*plus)/i.test(blob)) {
+                        score += 150;
                     }
 
-                    if (/(plus|expand|closed|tree.*plus)/i.test(blob)) {
-                        score += 100;
+                    if (/(minus|collapse|opened|tree.*minus)/i.test(blob)) {
+                        score -= 150;
                     }
 
                     if (el.tagName === 'IMG') score += 20;
                     if (el.closest('a,button,[onclick]')) score += 15;
 
-                    score -= Math.abs(px - r.right) * 0.2;
+                    score -= Math.abs(projectX - r.right) * 0.2;
 
-                    possible.push({
-                        el,
-                        r,
-                        score,
-                        blob,
-                        isMinus: /(minus|collapse|opened|tree.*minus)/i.test(blob),
-                        isPlus: /(plus|expand|closed|tree.*plus)/i.test(blob)
-                    });
+                    controls.push({ el, score });
                 }
 
-                possible.sort((a, b) => b.score - a.score);
+                controls.sort((a, b) => b.score - a.score);
 
-                return possible[0] || null;
-            }
+                const control = controls.find(x => x.score > 10);
 
-            function nextProjectY(item) {
-                const next = projectRows.find(row => row.r.cy > item.r.cy + 3);
-                return next ? next.r.cy : Number.POSITIVE_INFINITY;
-            }
-
-            function visibleChildCount(item) {
-                const stop = nextProjectY(item);
-                let count = 0;
-
-                for (const el of Array.from(
-                    item.entry.doc.querySelectorAll('a,span,td,div')
-                )) {
-                    if (!visible(item.entry, el)) continue;
-
-                    const r = rect(item.entry, el);
-                    const t = text(el);
-
-                    if (r.cy <= item.r.cy + 4 || r.cy >= stop - 2) continue;
-                    if (r.left < item.r.left + 10 || r.left > item.r.left + 430) continue;
-                    if (r.height < 8 || r.height > 50) continue;
-                    if (!t || t.length < 2 || t.length > 100) continue;
-                    if (knownProjectNames.has(t)) continue;
-
-                    if (
-                        /^\\d+\\s*営業日$/i.test(t) ||
-                        /^\\d{1,3}\\s*%$/i.test(t) ||
-                        /^\\d{1,2}\\/\\d{1,2}/.test(t)
-                    ) {
-                        continue;
-                    }
-
-                    count += 1;
-                }
-
-                return count;
-            }
-
-            // First collapse every OTHER expanded project.
-            // This prevents any other project's child rows from existing in the DOM
-            // while we scrape the selected one.
-            let collapsedOthers = 0;
-
-            for (const item of projectRows) {
-                if (item.name === targetName) continue;
-
-                const count = visibleChildCount(item);
-                if (count <= 0) continue;
-
-                const toggle = findTreeToggle(item);
-
-                if (toggle && toggle.isMinus) {
+                if (control) {
                     const clickable =
-                        toggle.el.closest('a,button,[onclick]') ||
-                        toggle.el;
+                        control.el.closest('a,button,[onclick]') ||
+                        control.el;
 
                     try {
                         clickable.click();
-                        collapsedOthers += 1;
+                        clickedExpand = true;
                     } catch (_) {}
                 }
             }
 
-            const targetItem = bestByName.get(targetName) || {
-                name: targetName,
-                entry,
-                el: marker.el,
-                r: marker.r
-            };
+            // Select/activate the exact project row, but never collapse other projects.
+            const directLink =
+                marker.el.closest('a,button,[onclick]') ||
+                marker.el.querySelector?.('a,button,[onclick]');
 
-            let childrenBefore = visibleChildCount(targetItem);
-            let expanded = childrenBefore > 0;
-
-            // Expand ONLY the target project.
-            if (!expanded) {
-                const toggle = findTreeToggle(targetItem);
-
-                if (toggle) {
-                    const clickable =
-                        toggle.el.closest('a,button,[onclick]') ||
-                        toggle.el;
-
-                    try {
-                        clickable.click();
-                        expanded = true;
-                    } catch (_) {}
-                }
-            }
-
-            // Also activate/select the project row itself.
-            if (attempt === 0) {
-                const directLink =
-                    marker.el.closest('a,button,[onclick]') ||
-                    marker.el.querySelector?.('a,button,[onclick]');
-
-                if (directLink) {
-                    try {
-                        directLink.click();
-                    } catch (_) {}
-                }
+            if (directLink) {
+                try {
+                    directLink.click();
+                } catch (_) {}
             }
 
             return {
-                status: expanded ? 'expanded-or-selected' : 'selected',
-                expanded,
-                children: visibleChildCount(targetItem),
-                collapsedOthers
+                status: 'selected',
+                expanded: hasChildren || clickedExpand
             };
         })();
         """
@@ -573,20 +454,17 @@ final class BrowserModel: ObservableObject {
 
                 let object = result as? [String: Any]
                 let status = object?["status"] as? String ?? "unknown"
-                let children = (object?["children"] as? NSNumber)?.intValue ?? 0
 
                 if status == "project-not-found" {
                     self.syncState = .failed("找不到「\(project.name)」的 Brabio 專案列")
                     return
                 }
 
-                // Brabio expands the tree / loads its task rows asynchronously.
-                try? await Task.sleep(nanoseconds: 850_000_000)
-
-                if children == 0 && attempt < 3 {
-                    self.prepareSelectedProject(project, attempt: attempt + 1)
-                    return
-                }
+                try? await Task.sleep(
+                    nanoseconds: UInt64(
+                        850_000_000 + min(attempt, 3) * 250_000_000
+                    )
+                )
 
                 self.extractTasks(attempt: 0)
             }
@@ -721,8 +599,8 @@ final class BrowserModel: ObservableObject {
             const selectedProjectName = \(projectNameJSON);
             const knownProjectNames = new Set(\(allProjectNamesJSON));
 
-            function collectDocs(root, offsetX = 0, offsetY = 0, depth = 0) {
-                const result = [{ doc: root, offsetX, offsetY, depth }];
+            function collectDocs(root, offsetX = 0, offsetY = 0) {
+                const result = [{ doc: root, offsetX, offsetY }];
 
                 for (const frame of Array.from(root.querySelectorAll('iframe,frame'))) {
                     try {
@@ -734,8 +612,7 @@ final class BrowserModel: ObservableObject {
                             ...collectDocs(
                                 frame.contentDocument,
                                 offsetX + r.left,
-                                offsetY + r.top,
-                                depth + 1
+                                offsetY + r.top
                             )
                         );
                     } catch (_) {}
@@ -791,6 +668,13 @@ final class BrowserModel: ObservableObject {
                     .trim();
             }
 
+            function iso(date) {
+                const y = date.getFullYear();
+                const m = String(date.getMonth() + 1).padStart(2, '0');
+                const d = String(date.getDate()).padStart(2, '0');
+                return `${y}-${m}-${d}`;
+            }
+
             function rgb(color) {
                 const m = String(color || '')
                     .match(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)/);
@@ -813,15 +697,7 @@ final class BrowserModel: ObservableObject {
             function saturation(color) {
                 const c = rgb(color);
                 if (!c) return 0;
-
                 return Math.max(c.r, c.g, c.b) - Math.min(c.r, c.g, c.b);
-            }
-
-            function iso(date) {
-                const y = date.getFullYear();
-                const m = String(date.getMonth() + 1).padStart(2, '0');
-                const d = String(date.getDate()).padStart(2, '0');
-                return `${y}-${m}-${d}`;
             }
 
             function isMetadata(value) {
@@ -843,7 +719,6 @@ final class BrowserModel: ObservableObject {
                 const text = cleanName(value);
 
                 if (text.length < 2 || text.length > 100) return true;
-                if (text === selectedProjectName) return true;
                 if (knownProjectNames.has(text)) return true;
                 if (isMetadata(text)) return true;
                 if (/^(ITG|Brabio)$/i.test(text)) return true;
@@ -855,7 +730,9 @@ final class BrowserModel: ObservableObject {
                 return false;
             }
 
-            // 1) Locate the selected project in the LEFT project tree.
+            // ------------------------------------------------------------
+            // A. Find the selected project in the LEFT tree.
+            // ------------------------------------------------------------
             let projectMarker = null;
 
             for (const entry of entries) {
@@ -864,11 +741,11 @@ final class BrowserModel: ObservableObject {
                 )) {
                     if (!visible(entry, el)) continue;
 
-                    const r = rectFor(entry, el);
                     const name = cleanName(textOf(el));
 
                     if (name !== selectedProjectName) continue;
 
+                    const r = rectFor(entry, el);
                     const area = r.width * r.height;
 
                     if (
@@ -892,7 +769,7 @@ final class BrowserModel: ObservableObject {
             if (!projectMarker) {
                 return {
                     tasks: [],
-                    debug: 'tree:none evidence:0 rows:0 bars:0 names:0 dates:0'
+                    debug: 'tree:none treeRows:0 tasks:0'
                 };
             }
 
@@ -900,74 +777,247 @@ final class BrowserModel: ObservableObject {
             const projectX = projectMarker.r.left;
             const projectY = projectMarker.r.cy;
 
-            // Find the NEXT REAL PROJECT heading using the exact project names
-            // already discovered by the native project directory.
+            // ------------------------------------------------------------
+            // B. Get the ACTUAL immediate child task rows from the left tree.
             //
-            // v1.8 used indentation + suffix matching here. On Brabio, different
-            // project rows can have slightly different nested X positions, so the
-            // next project heading could be missed and its children leaked into
-            // the selected project.
-            let stopY = Number.POSITIVE_INFINITY;
-            let stopProjectName = '';
+            // Prefer DOM row order (TR / role=row / LI). This is much more stable
+            // than guessing a Y cutoff from chart graphics.
+            // ------------------------------------------------------------
+            function nearestRow(el) {
+                if (!el) return null;
 
-            for (const el of Array.from(
-                entry.doc.querySelectorAll('a,span,td,div')
-            )) {
-                if (!visible(entry, el)) continue;
+                return (
+                    el.closest('tr') ||
+                    el.closest('[role="row"]') ||
+                    el.closest('li')
+                );
+            }
 
-                const r = rectFor(entry, el);
-                const name = cleanName(textOf(el));
+            const projectRow = nearestRow(projectMarker.el);
+            let rowList = [];
 
-                if (r.cy <= projectY + 3) continue;
-                if (name === selectedProjectName) continue;
-                if (!knownProjectNames.has(name)) continue;
+            if (projectRow) {
+                if (projectRow.tagName === 'TR') {
+                    const table = projectRow.closest('table');
+                    if (table) {
+                        rowList = Array.from(table.querySelectorAll('tr'));
+                    }
+                } else if (projectRow.matches('[role="row"]')) {
+                    const owner =
+                        projectRow.closest('[role="treegrid"],[role="grid"],[role="table"]') ||
+                        projectRow.parentElement;
 
-                // Project-directory headings live in the same left-side tree.
-                // Keep a generous horizontal allowance; exact-name matching is
-                // what makes the boundary safe.
-                if (r.left > projectX + 430) continue;
-
-                if (r.cy < stopY) {
-                    stopY = r.cy;
-                    stopProjectName = name;
+                    if (owner) {
+                        rowList = Array.from(owner.querySelectorAll('[role="row"]'));
+                    }
+                } else if (projectRow.tagName === 'LI') {
+                    const owner = projectRow.parentElement;
+                    if (owner) {
+                        rowList = Array.from(owner.children).filter(
+                            el => el.tagName === 'LI'
+                        );
+                    }
                 }
             }
 
-            // Secondary HARD boundary: the next folder/project icon row.
-            // Even if the next project's text node is nested differently, Brabio still
-            // renders a folder icon at the start of every project row.
-            let nextFolderY = Number.POSITIVE_INFINITY;
+            function bestTaskNameInRow(row) {
+                const candidates = [];
 
-            for (const el of Array.from(
-                entry.doc.querySelectorAll('img')
-            )) {
-                if (!visible(entry, el)) continue;
+                for (const el of Array.from(
+                    row.querySelectorAll('a,span,td,div')
+                )) {
+                    if (!visible(entry, el)) continue;
 
-                const r = rectFor(entry, el);
+                    const r = rectFor(entry, el);
+                    const name = cleanName(textOf(el));
 
-                if (r.cy <= projectY + 3) continue;
-                if (r.left > projectX + 80) continue;
+                    if (r.left < projectX + 8 || r.left > projectX + 430) continue;
+                    if (r.height < 8 || r.height > 48) continue;
+                    if (isBadTaskName(name)) continue;
 
-                const blob = [
-                    el.getAttribute('src') || '',
-                    el.getAttribute('alt') || '',
-                    el.getAttribute('title') || '',
-                    el.id || '',
-                    typeof el.className === 'string' ? el.className : ''
-                ].join(' ').toLowerCase();
+                    const childTexts = Array.from(el.children || [])
+                        .filter(child => visible(entry, child))
+                        .map(child => cleanName(textOf(child)))
+                        .filter(t => t && !isMetadata(t));
 
-                if (!/(folder|project|dir)/i.test(blob)) continue;
+                    const isContainer =
+                        Array.from(new Set(childTexts))
+                            .filter(t => t !== name)
+                            .length >= 2;
 
-                nextFolderY = Math.min(nextFolderY, r.cy);
+                    if (isContainer) continue;
+
+                    let score = 0;
+                    if (el.tagName === 'A') score += 100;
+                    if (el.closest('a')) score += 50;
+                    if (el.hasAttribute('onclick')) score += 25;
+                    score += Math.min(40, Math.max(0, r.left - projectX) * 0.15);
+                    score -= (r.width * r.height) / 5000;
+
+                    candidates.push({
+                        name,
+                        r,
+                        score
+                    });
+                }
+
+                candidates.sort((a, b) => b.score - a.score);
+                return candidates[0] || null;
             }
 
-            stopY = Math.min(stopY, nextFolderY);
+            const taskRows = [];
+            let stopProjectName = '';
 
-            const treeRight = projectX + 430;
+            if (projectRow && rowList.length) {
+                const projectIndex = rowList.indexOf(projectRow);
 
-            // 2) Detect the metadata the user pointed out:
-            //    "59営業日", "10/30(金)", "87%" ...
-            //    These values tell us WHICH VISUAL ROW is a real task row.
+                if (projectIndex >= 0) {
+                    for (let i = projectIndex + 1; i < rowList.length; i++) {
+                        const row = rowList[i];
+
+                        if (!visible(entry, row)) continue;
+
+                        const rowText = cleanName(textOf(row));
+
+                        // Hard stop at the first following known project heading.
+                        let foundProject = '';
+
+                        for (const projectName of knownProjectNames) {
+                            if (
+                                projectName !== selectedProjectName &&
+                                (
+                                    rowText === projectName ||
+                                    Array.from(row.querySelectorAll('a,span,td,div'))
+                                        .some(el =>
+                                            visible(entry, el) &&
+                                            cleanName(textOf(el)) === projectName
+                                        )
+                                )
+                            ) {
+                                foundProject = projectName;
+                                break;
+                            }
+                        }
+
+                        if (foundProject) {
+                            stopProjectName = foundProject;
+                            break;
+                        }
+
+                        const task = bestTaskNameInRow(row);
+
+                        if (!task) continue;
+
+                        // Use the real row center, not text element center, when possible.
+                        const rr = rectFor(entry, row);
+
+                        taskRows.push({
+                            name: task.name,
+                            y: rr.cy,
+                            r: task.r
+                        });
+                    }
+                }
+            }
+
+            // Fallback for old Brabio markup without semantic/table rows:
+            // use geometry, but ONLY between selected project and the next exact
+            // known project name.
+            if (taskRows.length === 0) {
+                let stopY = Number.POSITIVE_INFINITY;
+
+                for (const el of Array.from(
+                    entry.doc.querySelectorAll('a,span,td,div')
+                )) {
+                    if (!visible(entry, el)) continue;
+
+                    const name = cleanName(textOf(el));
+                    const r = rectFor(entry, el);
+
+                    if (r.cy <= projectY + 3) continue;
+                    if (name === selectedProjectName) continue;
+                    if (!knownProjectNames.has(name)) continue;
+                    if (r.left > projectX + 430) continue;
+
+                    if (r.cy < stopY) {
+                        stopY = r.cy;
+                        stopProjectName = name;
+                    }
+                }
+
+                const candidates = [];
+
+                for (const el of Array.from(
+                    entry.doc.querySelectorAll('a,span,td,div')
+                )) {
+                    if (!visible(entry, el)) continue;
+
+                    const r = rectFor(entry, el);
+                    const name = cleanName(textOf(el));
+
+                    if (r.cy <= projectY + 4 || r.cy >= stopY - 2) continue;
+                    if (r.left < projectX + 8 || r.left > projectX + 430) continue;
+                    if (r.height < 8 || r.height > 48) continue;
+                    if (isBadTaskName(name)) continue;
+
+                    let score = 0;
+                    if (el.tagName === 'A') score += 100;
+                    if (el.closest('a')) score += 50;
+                    if (el.hasAttribute('onclick')) score += 25;
+                    score += Math.min(40, Math.max(0, r.left - projectX) * 0.15);
+
+                    candidates.push({
+                        name,
+                        r,
+                        score
+                    });
+                }
+
+                candidates.sort((a, b) => {
+                    if (Math.abs(a.r.cy - b.r.cy) > 6) {
+                        return a.r.cy - b.r.cy;
+                    }
+
+                    return b.score - a.score;
+                });
+
+                for (const item of candidates) {
+                    const sameRow = taskRows.find(
+                        x => Math.abs(x.y - item.r.cy) <= 7
+                    );
+
+                    if (sameRow) continue;
+
+                    taskRows.push({
+                        name: item.name,
+                        y: item.r.cy,
+                        r: item.r
+                    });
+                }
+            }
+
+            // De-duplicate by row + name.
+            const cleanTaskRows = [];
+
+            for (const item of taskRows) {
+                if (
+                    cleanTaskRows.some(existing =>
+                        existing.name === item.name &&
+                        Math.abs(existing.y - item.y) <= 7
+                    )
+                ) {
+                    continue;
+                }
+
+                cleanTaskRows.push(item);
+            }
+
+            cleanTaskRows.sort((a, b) => a.y - b.y);
+
+            // ------------------------------------------------------------
+            // C. Read progress / business days / dates / Gantt bars,
+            // but ONLY match them to the task rows found above.
+            // ------------------------------------------------------------
             const evidence = [];
 
             for (const el of Array.from(
@@ -976,24 +1026,23 @@ final class BrowserModel: ObservableObject {
                 if (!visible(entry, el)) continue;
 
                 const r = rectFor(entry, el);
-
-                if (r.cy <= projectY + 3 || r.cy >= stopY - 2) continue;
-                if (r.height < 8 || r.height > 48) continue;
-
                 const text = textOf(el);
 
-                const progressMatch = text.match(/(?:^|\\s)(\\d{1,3})\\s*%(?:\\s|$)/);
-                const businessMatch = text.match(/(?:^|\\s)(\\d+)\\s*営業日(?:\\s|$)/);
-                const dateMatch = text.match(/(?:^|\\s)(\\d{1,2}\\/\\d{1,2})\\s*\\([^)]+\\)(?:\\s|$)/);
+                if (r.height < 8 || r.height > 48) continue;
+
+                const progressMatch =
+                    text.match(/(?:^|\\s)(\\d{1,3})\\s*%(?:\\s|$)/);
+
+                const businessMatch =
+                    text.match(/(?:^|\\s)(\\d+)\\s*営業日(?:\\s|$)/);
+
+                const dateMatch =
+                    text.match(/(?:^|\\s)(\\d{1,2}\\/\\d{1,2})\\s*\\([^)]+\\)(?:\\s|$)/);
 
                 if (!progressMatch && !businessMatch && !dateMatch) continue;
 
-                // Ignore giant parent containers containing many rows.
-                if (r.width > 900 && r.height > 35) continue;
-
                 evidence.push({
                     r,
-                    text,
                     progress: progressMatch
                         ? Math.max(0, Math.min(100, Number(progressMatch[1])))
                         : null,
@@ -1006,8 +1055,6 @@ final class BrowserModel: ObservableObject {
                 });
             }
 
-            // 3) Find painted Gantt bars. Their own text/title is the strongest
-            //    source for the task name ("程式設計:韌體", "靜態檢驗SOP", etc.).
             const bars = [];
             const w = winFor(entry);
 
@@ -1016,7 +1063,6 @@ final class BrowserModel: ObservableObject {
 
                 const r = rectFor(entry, el);
 
-                if (r.cy <= projectY + 3 || r.cy >= stopY - 2) continue;
                 if (r.width < 16) continue;
                 if (r.height < 5 || r.height > 36) continue;
 
@@ -1045,7 +1091,6 @@ final class BrowserModel: ObservableObject {
 
                 if (!painted) continue;
 
-                // Skip pale grid/background cells.
                 if (
                     saturation(bg) < 8 &&
                     brightness(bg) > 225 &&
@@ -1054,7 +1099,7 @@ final class BrowserModel: ObservableObject {
                     continue;
                 }
 
-                const textCandidates = [
+                const barName = [
                     textOf(el),
                     el.getAttribute('title') || '',
                     el.getAttribute('alt') || '',
@@ -1063,19 +1108,16 @@ final class BrowserModel: ObservableObject {
                     el.getAttribute('data-name') || ''
                 ]
                 .map(cleanName)
-                .filter(t => !isBadTaskName(t));
+                .find(t => t && !isBadTaskName(t)) || '';
 
                 bars.push({
-                    el,
                     r,
-                    sat: saturation(bg),
-                    name: textCandidates[0] || ''
+                    name: barName,
+                    sat: saturation(bg)
                 });
             }
 
-            // 4) Date anchors for converting bar X position to dates.
-            const dateAnchors = [];
-
+            // Date anchors.
             const monthNodes = [];
 
             for (const el of Array.from(
@@ -1094,6 +1136,8 @@ final class BrowserModel: ObservableObject {
                     month: Number(m[2])
                 });
             }
+
+            const dateAnchors = [];
 
             for (const el of Array.from(
                 entry.doc.querySelectorAll('div,span,td,th')
@@ -1118,7 +1162,6 @@ final class BrowserModel: ObservableObject {
                         r.cx <= month.r.right + 20;
 
                     const distance = Math.abs(r.cx - month.r.cx);
-
                     const score = contains
                         ? distance * 0.2
                         : distance + 1000;
@@ -1209,161 +1252,44 @@ final class BrowserModel: ObservableObject {
                 return result;
             }
 
-            // 5) Create rows from metadata OR bars.
-            //    Then choose task name in this priority:
-            //      A. text printed inside the progress bar
-            //      B. left task-tree text on the exact same Y row
-            //    Metadata itself is NEVER used as the task name.
-            const rowCenters = [];
-
-            for (const item of evidence) {
-                rowCenters.push(item.r.cy);
-            }
-
-            for (const bar of bars) {
-                if (!rowCenters.some(y => Math.abs(y - bar.r.cy) <= 8)) {
-                    rowCenters.push(bar.r.cy);
-                }
-            }
-
-            rowCenters.sort((a, b) => a - b);
-
-            const clusteredRows = [];
-
-            for (const y of rowCenters) {
-                const existing = clusteredRows.find(row =>
-                    Math.abs(row.y - y) <= 8
-                );
-
-                if (existing) {
-                    existing.values.push(y);
-                    existing.y =
-                        existing.values.reduce((a, b) => a + b, 0) /
-                        existing.values.length;
-                } else {
-                    clusteredRows.push({
-                        y,
-                        values: [y]
-                    });
-                }
-            }
-
             const results = [];
 
-            for (const row of clusteredRows) {
-                const y = row.y;
+            for (const task of cleanTaskRows) {
+                const y = task.y;
 
-                const rowEvidence = evidence.filter(item =>
-                    Math.abs(item.r.cy - y) <= 12
+                const rowEvidence = evidence.filter(
+                    item => Math.abs(item.r.cy - y) <= 12
                 );
 
                 const progressEvidence =
                     rowEvidence.find(item => item.progress !== null);
 
-                const businessEvidence =
-                    rowEvidence.find(item => item.businessDays !== null);
-
                 const rowBars = bars
                     .filter(bar => Math.abs(bar.r.cy - y) <= 14)
                     .sort((a, b) => {
-                        // Prefer bar with a real printed name.
-                        if (!!a.name !== !!b.name) {
-                            return a.name ? -1 : 1;
-                        }
+                        // Prefer the bar whose printed text exactly matches this task.
+                        const aMatch = a.name === task.name ? 1 : 0;
+                        const bMatch = b.name === task.name ? 1 : 0;
 
-                        // Then prefer more saturated colored bars.
-                        if (Math.abs(a.sat - b.sat) > 4) {
-                            return b.sat - a.sat;
-                        }
-
+                        if (aMatch !== bMatch) return bMatch - aMatch;
+                        if (Math.abs(a.sat - b.sat) > 4) return b.sat - a.sat;
                         return b.r.width - a.r.width;
                     });
 
                 const bar = rowBars[0] || null;
 
-                let name = '';
-
-                // A) Name printed inside progress bar.
-                for (const candidate of rowBars) {
-                    if (!candidate.name) continue;
-
-                    name = candidate.name;
-                    break;
-                }
-
-                // B) If the bar has no text, find the left-tree label on same row.
-                if (!name) {
-                    const candidates = [];
-
-                    for (const el of Array.from(
-                        entry.doc.querySelectorAll('a,span,td,div')
-                    )) {
-                        if (!visible(entry, el)) continue;
-
-                        const r = rectFor(entry, el);
-
-                        if (Math.abs(r.cy - y) > 9) continue;
-                        if (r.left < projectX || r.left > treeRight) continue;
-                        if (r.width < 12 || r.width > 430) continue;
-                        if (r.height < 9 || r.height > 48) continue;
-
-                        const text = cleanName(textOf(el));
-
-                        if (isBadTaskName(text)) continue;
-
-                        const visibleChildren = Array.from(el.children || [])
-                            .filter(child => visible(entry, child))
-                            .map(child => cleanName(textOf(child)))
-                            .filter(t => t && !isMetadata(t));
-
-                        const container =
-                            Array.from(new Set(visibleChildren))
-                                .filter(t => t !== text)
-                                .length >= 2;
-
-                        if (container) continue;
-
-                        candidates.push({
-                            text,
-                            r,
-                            area: r.width * r.height
-                        });
-                    }
-
-                    candidates.sort((a, b) => {
-                        // More indented child text first, then smaller box.
-                        if (Math.abs(a.r.left - b.r.left) > 8) {
-                            return b.r.left - a.r.left;
-                        }
-
-                        return a.area - b.area;
-                    });
-
-                    name = candidates[0]?.text || '';
-                }
-
-                if (!name || isBadTaskName(name)) continue;
-
-                let startDate;
-                let endDate;
+                let startDate = new Date();
+                let endDate = startDate;
 
                 if (bar) {
                     startDate = dateFromX(bar.r.left);
                     endDate = dateFromX(bar.r.right);
-                } else {
-                    startDate = new Date();
-                    endDate = startDate;
+
+                    if (endDate < startDate) {
+                        endDate = startDate;
+                    }
                 }
 
-                if (endDate < startDate) {
-                    endDate = startDate;
-                }
-
-                const progress = progressEvidence
-                    ? progressEvidence.progress
-                    : 0;
-
-                // Assignee is secondary information; only read email on the same row.
                 let assignee = '未指定';
 
                 for (const el of Array.from(
@@ -1374,7 +1300,7 @@ final class BrowserModel: ObservableObject {
                     const r = rectFor(entry, el);
 
                     if (Math.abs(r.cy - y) > 12) continue;
-                    if (r.left <= treeRight) continue;
+                    if (r.left <= projectX + 430) continue;
 
                     const text = textOf(el);
                     const email = text.match(
@@ -1388,44 +1314,24 @@ final class BrowserModel: ObservableObject {
                 }
 
                 results.push({
-                    name,
+                    name: task.name,
                     start: iso(startDate),
                     end: iso(endDate),
-                    progress,
-                    assignee,
-                    y,
-                    businessDays: businessEvidence
-                        ? businessEvidence.businessDays
-                        : null
+                    progress: progressEvidence
+                        ? progressEvidence.progress
+                        : 0,
+                    assignee
                 });
             }
 
-            // De-duplicate only the same name on the same visual row.
-            results.sort((a, b) => a.y - b.y);
-
-            const final = [];
-
-            for (const item of results) {
-                const duplicate = final.some(existing =>
-                    existing.name === item.name &&
-                    Math.abs(existing.y - item.y) <= 7
-                );
-
-                if (!duplicate) {
-                    final.push(item);
-                }
-            }
-
             return {
-                tasks: final.slice(0, 400),
+                tasks: results.slice(0, 400),
                 debug:
                     `tree:left ` +
+                    `treeRows:${rowList.length} ` +
                     `stop:${stopProjectName || 'END'} ` +
-                    `folderStop:${Number.isFinite(nextFolderY) ? Math.round(nextFolderY) : 'END'} ` +
-                    `evidence:${evidence.length} ` +
-                    `rows:${clusteredRows.length} ` +
+                    `tasks:${cleanTaskRows.length} ` +
                     `bars:${bars.length} ` +
-                    `names:${final.length} ` +
                     `dates:${compactAnchors.length}`
             };
         })();
