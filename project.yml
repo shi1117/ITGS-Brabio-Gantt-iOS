@@ -21,6 +21,8 @@ targets:
       - path: ContentView.swift
       - path: WebView.swift
       - path: ITGSBrabioGanttApp.swift
+    resources:
+      - path: LaunchScreen.storyboard
     info:
       path: Info.plist
     settings:
