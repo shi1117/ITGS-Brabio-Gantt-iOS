@@ -596,6 +596,15 @@ final class BrowserModel: ObservableObject {
             // business-day counts and dates were incorrectly treated as tasks.
             //
             // v1.5 always chooses the LEFTMOST exact project-name hit first.
+            // -------- 1. Find the SELECTED PROJECT in the LEFT task tree --------
+            //
+            // v1.5 proved the correct project tree is found (tree:left),
+            // but labels:0 showed that Brabio does NOT expose these task names
+            // as plain <a> / [onclick] elements. Its old UI uses delegated click
+            // handlers / nested table cells.
+            //
+            // v1.6 therefore reads VISUAL ROW TEXT from the selected project's
+            // left tree only, then keeps one atomic label per row.
             let projectMarker = null;
 
             for (const entry of entries) {
@@ -613,6 +622,7 @@ final class BrowserModel: ObservableObject {
 
                     const area = r.width * r.height;
 
+                    // Exact project-name hit furthest to the LEFT wins.
                     if (
                         projectMarker === null ||
                         r.left < projectMarker.r.left - 8 ||
@@ -633,29 +643,34 @@ final class BrowserModel: ObservableObject {
             }
 
             let labels = [];
+            let rawTreeRows = 0;
 
             if (projectMarker !== null) {
                 const entry = projectMarker.entry;
                 const projectX = projectMarker.r.left;
                 const projectY = projectMarker.r.cy;
 
-                // Keep all task-name discovery inside the same document/frame as the
-                // left-side project tree. Do NOT read the detail pane.
-                const treeRight = projectX + 420;
+                // The Brabio project tree is the narrow pane on the left.
+                // Keep all extraction inside the SAME frame/document as the marker.
+                const treeLeft = Math.max(entry.offsetX, projectX - 40);
+                const treeRight = projectX + 430;
 
-                // Find where the next top-level project starts.
+                // Find next top-level project row. That is the end of this project's
+                // children. We deliberately use the same frame only.
                 let stopY = Number.POSITIVE_INFINITY;
 
-                for (const el of Array.from(
+                const allTreeNodes = Array.from(
                     entry.doc.querySelectorAll('a,span,td,div')
-                )) {
+                );
+
+                for (const el of allTreeNodes) {
                     if (!visible(entry, el)) continue;
 
                     const r = rectFor(entry, el);
                     const name = cleanName(textOf(el));
 
                     if (r.cy <= projectY + 3) continue;
-                    if (r.left > projectX + 22) continue;
+                    if (r.left < treeLeft || r.left > projectX + 28) continue;
 
                     const looksLikeProject =
                         /(事業|專案|项目|プロジェクト|請假|休暇)$/i.test(name);
@@ -668,109 +683,138 @@ final class BrowserModel: ObservableObject {
                     }
                 }
 
-                function isScheduleOrMetadata(value) {
+                function isMetadata(value) {
                     const name = cleanName(value);
 
+                    if (!name) return true;
                     if (/^\\d+\\s*営業日$/i.test(name)) return true;
                     if (/^\\d{1,2}\\/\\d{1,2}\\s*\\([^)]+\\)$/i.test(name)) return true;
                     if (/^\\d{1,2}月\\d{1,2}日(?:\\s*\\([^)]+\\))?$/i.test(name)) return true;
                     if (/^\\d{1,3}\\s*%$/i.test(name)) return true;
-                    if (/^(登録|更新|期間|進捗|最終更新|メンバー|あしあと)$/i.test(name)) return true;
+                    if (/^(登録|更新|期間|進捗|最終更新|メンバー|あしあと|内容|添付ファイル)$/i.test(name)) return true;
                     if (/@/.test(name)) return true;
 
                     return false;
                 }
 
-                // Brabio's actual task names are clickable links in the left task tree.
-                const anchors = Array.from(
-                    entry.doc.querySelectorAll('a')
-                )
-                .filter(el => visible(entry, el))
-                .map(el => ({
-                    entry,
-                    el,
-                    name: cleanName(textOf(el)),
-                    r: rectFor(entry, el),
-                    href: el.getAttribute('href') || '',
-                    onclick: el.getAttribute('onclick') || '',
-                    quality: 3
-                }))
-                .filter(item =>
-                    item.r.cy > projectY + 3 &&
-                    item.r.cy < stopY - 2 &&
-                    item.r.left >= projectX + 12 &&
-                    item.r.left <= treeRight &&
-                    item.r.height >= 9 &&
-                    item.r.height <= 60 &&
-                    !isBadTaskName(item.name) &&
-                    !isScheduleOrMetadata(item.name)
-                )
-                .sort((a, b) => {
-                    if (Math.abs(a.r.cy - b.r.cy) > 2) {
-                        return a.r.cy - b.r.cy;
-                    }
+                const candidates = [];
 
-                    return a.r.left - b.r.left;
-                });
+                for (const el of allTreeNodes) {
+                    if (!visible(entry, el)) continue;
 
-                // Keep exactly one clickable task name per visual row.
-                // This prevents nested anchors/icons from duplicating a task.
-                for (const item of anchors) {
-                    const sameRow = labels.find(existing =>
-                        Math.abs(existing.r.cy - item.r.cy) <= 6
-                    );
+                    const r = rectFor(entry, el);
+                    const name = cleanName(textOf(el));
 
-                    if (sameRow) {
-                        // Prefer the text link over a small icon link.
-                        if (
-                            item.name.length > sameRow.name.length &&
-                            item.r.width > sameRow.r.width
-                        ) {
-                            const index = labels.indexOf(sameRow);
-                            labels[index] = item;
-                        }
+                    if (r.cy <= projectY + 3 || r.cy >= stopY - 2) continue;
+                    if (r.left < treeLeft || r.left > treeRight) continue;
+                    if (r.width < 12 || r.width > 430) continue;
+                    if (r.height < 9 || r.height > 48) continue;
+                    if (isBadTaskName(name)) continue;
+                    if (isMetadata(name)) continue;
 
+                    // Exclude another project heading that happens to be nested.
+                    if (
+                        /(事業|專案|项目|プロジェクト|請假|休暇)$/i.test(name) &&
+                        r.left <= projectX + 26
+                    ) {
                         continue;
                     }
 
-                    labels.push(item);
-                }
+                    // Reject container elements whose text is made of multiple visible
+                    // child labels. Keep the "atomic" text node for that row.
+                    const visibleChildren = Array.from(el.children || [])
+                        .filter(child => visible(entry, child))
+                        .map(child => cleanName(textOf(child)))
+                        .filter(t => t && !isMetadata(t));
 
-                // Fallback only to CLICKABLE elements. Never use arbitrary span/div text,
-                // because those are where "小石", "59営業日", "9/30(水)" came from.
-                if (labels.length === 0) {
-                    const clickables = Array.from(
-                        entry.doc.querySelectorAll('[onclick]')
+                    const distinctChildTexts = Array.from(
+                        new Set(visibleChildren)
                     );
 
-                    for (const el of clickables) {
-                        if (!visible(entry, el)) continue;
+                    const isContainer =
+                        distinctChildTexts.length >= 2 &&
+                        distinctChildTexts.some(t => t !== name);
 
-                        const r = rectFor(entry, el);
-                        const name = cleanName(textOf(el));
+                    if (isContainer) continue;
 
-                        if (r.cy <= projectY + 3 || r.cy >= stopY - 2) continue;
-                        if (r.left < projectX + 12 || r.left > treeRight) continue;
-                        if (r.height < 9 || r.height > 60) continue;
-                        if (isBadTaskName(name)) continue;
-                        if (isScheduleOrMetadata(name)) continue;
+                    const clickable =
+                        el.tagName === 'A' ||
+                        el.hasAttribute('onclick') ||
+                        !!el.closest('a,[onclick]');
 
-                        const duplicateRow = labels.some(existing =>
-                            Math.abs(existing.r.cy - r.cy) <= 6
-                        );
+                    candidates.push({
+                        entry,
+                        el,
+                        name,
+                        r,
+                        clickable,
+                        area: r.width * r.height,
+                        quality: clickable ? 3 : 1
+                    });
+                }
 
-                        if (duplicateRow) continue;
+                rawTreeRows = candidates.length;
 
-                        labels.push({
-                            entry,
-                            el,
-                            name,
-                            r,
-                            href: '',
-                            onclick: el.getAttribute('onclick') || '',
-                            quality: 1
-                        });
+                // Group by visual row. Brabio creates several nested DOM elements for
+                // the same row; choose the best candidate from each row.
+                candidates.sort((a, b) => {
+                    if (Math.abs(a.r.cy - b.r.cy) > 3) {
+                        return a.r.cy - b.r.cy;
                     }
+
+                    if (a.quality !== b.quality) {
+                        return b.quality - a.quality;
+                    }
+
+                    // Prefer the smaller atomic text box.
+                    return a.area - b.area;
+                });
+
+                const rowGroups = [];
+
+                for (const item of candidates) {
+                    let group = rowGroups.find(g =>
+                        Math.abs(g.cy - item.r.cy) <= 7
+                    );
+
+                    if (!group) {
+                        group = {
+                            cy: item.r.cy,
+                            items: []
+                        };
+                        rowGroups.push(group);
+                    }
+
+                    group.items.push(item);
+                }
+
+                for (const group of rowGroups) {
+                    const items = group.items
+                        .filter(item => !isMetadata(item.name))
+                        .sort((a, b) => {
+                            if (a.quality !== b.quality) {
+                                return b.quality - a.quality;
+                            }
+
+                            // Prefer the visually indented child text, then smaller area.
+                            if (Math.abs(a.r.left - b.r.left) > 8) {
+                                return b.r.left - a.r.left;
+                            }
+
+                            return a.area - b.area;
+                        });
+
+                    if (!items.length) continue;
+
+                    const chosen = items[0];
+
+                    // Final hard filters for known non-task labels.
+                    if (chosen.name === selectedProjectName) continue;
+                    if (/^(ITG|Brabio)$/i.test(chosen.name)) continue;
+                    if (/ブラビオへようこそ|トップページ/.test(chosen.name)) continue;
+                    if (/全画面表示設定|チャート|カレンダー|担当状況/.test(chosen.name)) continue;
+
+                    labels.push(chosen);
                 }
             }
 
@@ -1129,6 +1173,7 @@ final class BrowserModel: ObservableObject {
                 debug:
                     `frames:${entries.length - 1} ` +
                     `tree:${projectMarker ? 'left' : 'none'} ` +
+                    `raw:${rawTreeRows} ` +
                     `labels:${labels.length} ` +
                     `bars:${bars.length} ` +
                     `dates:${compactAnchors.length}`
