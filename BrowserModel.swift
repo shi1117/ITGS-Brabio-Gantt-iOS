@@ -2160,95 +2160,116 @@ final class BrowserModel: ObservableObject {
                     .trim();
             }
 
+            function percentOptions(select) {
+                return Array.from(select.options || [])
+                    .filter(option =>
+                        /^\\s*\\d{1,3}\\s*%\\s*$/.test(
+                            option.textContent || ''
+                        )
+                    );
+            }
+
+            let best = null;
+
             for (const d of docs(document)) {
-                const progressLabels = Array.from(
-                    d.querySelectorAll('div,span,td,p,label,strong')
+                const labels = Array.from(
+                    d.querySelectorAll(
+                        'div,span,td,p,label,strong'
+                    )
                 )
                 .filter(el => visible(d, el))
                 .map(el => ({
-                    el,
                     text: clean(el.innerText || el.textContent),
                     r: el.getBoundingClientRect()
                 }))
                 .filter(item =>
-                    /^進捗(?:\\s|$)/.test(item.text)
-                )
-                .sort((a, b) => b.r.left - a.r.left);
+                    item.text === '進捗' ||
+                    /^進捗\\s/.test(item.text)
+                );
 
-                for (const label of progressLabels) {
-                    const selects = Array.from(
-                        d.querySelectorAll('select')
-                    )
-                    .filter(el => visible(d, el))
-                    .map(el => ({
-                        el,
-                        r: el.getBoundingClientRect()
-                    }))
-                    .filter(item =>
-                        Math.abs(item.r.top - label.r.top) <= 45 &&
-                        item.r.left >= label.r.left - 20
-                    )
-                    .sort((a, b) => a.r.left - b.r.left);
+                for (const select of Array.from(
+                    d.querySelectorAll('select')
+                )) {
+                    if (!visible(d, select)) continue;
 
-                    for (const item of selects) {
-                        const select = item.el;
-                        const options = Array.from(select.options || []);
+                    const options = percentOptions(select);
+                    if (options.length < 2) continue;
 
-                        const percentOptions = options.filter(option =>
-                            /^\\s*\\d{1,3}\\s*%\\s*$/.test(
-                                option.textContent || ''
-                            )
-                        );
+                    const r = select.getBoundingClientRect();
 
-                        if (percentOptions.length < 2) continue;
+                    const nearLabel = labels.some(label =>
+                        Math.abs(label.r.top - r.top) <= 45 &&
+                        label.r.left <= r.left + 50
+                    );
 
-                        const exact = percentOptions.find(option => {
-                            const m = (option.textContent || '')
-                                .match(/(\\d{1,3})\\s*%/);
+                    let score = r.left * 5 + options.length * 20;
 
-                            return m && Number(m[1]) === target;
-                        });
+                    if (nearLabel) score += 10000;
 
-                        if (!exact) continue;
-
-                        try {
-                            const setter = Object
-                                .getOwnPropertyDescriptor(
-                                    d.defaultView.HTMLSelectElement.prototype,
-                                    'value'
-                                )?.set;
-
-                            if (setter) {
-                                setter.call(select, exact.value);
-                            } else {
-                                select.value = exact.value;
-                            }
-                        } catch (_) {
-                            select.value = exact.value;
-                        }
-
-                        select.dispatchEvent(
-                            new Event('input', { bubbles: true })
-                        );
-
-                        select.dispatchEvent(
-                            new Event('change', { bubbles: true })
-                        );
-
-                        try {
-                            select.blur();
-                        } catch (_) {}
-
-                        return {
-                            status: 'changed',
-                            progress: target
+                    if (!best || score > best.score) {
+                        best = {
+                            d,
+                            select,
+                            options,
+                            score
                         };
                     }
                 }
             }
 
+            if (!best) {
+                return {
+                    status: 'progress-select-not-found'
+                };
+            }
+
+            const exact = best.options.find(option => {
+                const m = (option.textContent || '')
+                    .match(/(\\d{1,3})\\s*%/);
+
+                return m && Number(m[1]) === target;
+            });
+
+            if (!exact) {
+                return {
+                    status: 'target-progress-not-found'
+                };
+            }
+
+            const select = best.select;
+            const d = best.d;
+
+            try {
+                const setter = Object
+                    .getOwnPropertyDescriptor(
+                        d.defaultView.HTMLSelectElement.prototype,
+                        'value'
+                    )?.set;
+
+                if (setter) {
+                    setter.call(select, exact.value);
+                } else {
+                    select.value = exact.value;
+                }
+            } catch (_) {
+                select.value = exact.value;
+            }
+
+            select.dispatchEvent(
+                new Event('input', { bubbles: true })
+            );
+
+            select.dispatchEvent(
+                new Event('change', { bubbles: true })
+            );
+
+            try {
+                select.blur();
+            } catch (_) {}
+
             return {
-                status: 'progress-select-not-found'
+                status: 'changed',
+                progress: target
             };
         })();
         """
@@ -2272,7 +2293,7 @@ final class BrowserModel: ObservableObject {
                 guard status == "changed" else {
                     self.taskProgressSaving = false
                     self.taskDetailMessage =
-                        "找不到 Brabio 的百分比進度選單"
+                        "找不到 Brabio 的百分比進度選單（\(status)）"
                     return
                 }
 
@@ -2366,11 +2387,13 @@ final class BrowserModel: ObservableObject {
                 )
                 .filter(el => visible(d, el))
                 .filter(el =>
-                    clean(
-                        el.innerText ||
-                        el.value ||
-                        el.textContent
-                    ) === '変更する'
+                    /変更する/.test(
+                        clean(
+                            el.innerText ||
+                            el.value ||
+                            el.textContent
+                        )
+                    )
                 );
 
                 const candidates = [];
@@ -2674,10 +2697,31 @@ final class BrowserModel: ObservableObject {
                     .trim();
             }
 
-            function textItems(entry) {
-                return Array.from(
-                    entry.doc.querySelectorAll(
-                        'div,span,td,p,a,label,strong,pre,h1,h2,h3'
+            function percentValues(select) {
+                return Array.from(select.options || [])
+                    .map(option => {
+                        const value = clean(option.textContent);
+                        const m = value.match(/^(\\d{1,3})\\s*%$/);
+                        return m ? Number(m[1]) : null;
+                    })
+                    .filter(value =>
+                        value !== null &&
+                        value >= 0 &&
+                        value <= 100
+                    );
+            }
+
+            const entries = docs(document);
+            let chosen = null;
+
+            // The real task pane has a percent SELECT (0%..100%).
+            // Score all such selects and strongly prefer one beside "進捗".
+            for (const entry of entries) {
+                const d = entry.doc;
+
+                const textNodes = Array.from(
+                    d.querySelectorAll(
+                        'div,span,td,p,a,label,strong,h1,h2,h3'
                     )
                 )
                 .filter(el => visible(entry, el))
@@ -2687,99 +2731,98 @@ final class BrowserModel: ObservableObject {
                     r: rect(entry, el)
                 }))
                 .filter(item => item.text.length > 0);
-            }
 
-            function exactOrShort(items, regex, maxLength = 220) {
-                return items
-                    .filter(item =>
-                        item.text.length <= maxLength &&
-                        regex.test(item.text)
-                    )
-                    .sort((a, b) => {
-                        if (a.text.length !== b.text.length) {
-                            return a.text.length - b.text.length;
-                        }
-
-                        return a.r.top - b.r.top;
-                    })[0] || null;
-            }
-
-            const entries = docs(document);
-            let chosen = null;
-
-            for (const entry of entries) {
-                const items = textItems(entry);
-
-                const contentTabs = items.filter(item =>
-                    item.text === '内容'
+                const progressLabels = textNodes.filter(item =>
+                    (
+                        item.text === '進捗' ||
+                        /^進捗\\s/.test(item.text)
+                    ) &&
+                    item.text.length <= 40
                 );
 
-                for (const contentTab of contentTabs) {
-                    const attachmentTabs = items
+                const periodLabels = textNodes.filter(item =>
+                    (
+                        item.text === '期間' ||
+                        /^期間\\s/.test(item.text)
+                    ) &&
+                    item.text.length <= 80
+                );
+
+                const commentFields = Array.from(
+                    d.querySelectorAll('input,textarea')
+                )
+                .filter(el => visible(entry, el))
+                .map(el => ({
+                    el,
+                    placeholder: clean(
+                        el.getAttribute('placeholder') || ''
+                    ),
+                    r: rect(entry, el)
+                }))
+                .filter(item =>
+                    /コメント/.test(item.placeholder)
+                );
+
+                for (const select of Array.from(
+                    d.querySelectorAll('select')
+                )) {
+                    if (!visible(entry, select)) continue;
+
+                    const percentages = percentValues(select);
+
+                    if (percentages.length < 2) continue;
+
+                    const r = rect(entry, select);
+
+                    const nearbyProgress = progressLabels
                         .filter(item =>
-                            /^添付ファイル/.test(item.text) &&
-                            Math.abs(item.r.cy - contentTab.r.cy) <= 40 &&
-                            item.r.left >= contentTab.r.left
+                            Math.abs(item.r.cy - r.cy) <= 45 &&
+                            item.r.left <= r.left + 40
                         )
                         .sort((a, b) =>
-                            Math.abs(a.r.left - contentTab.r.right) -
-                            Math.abs(b.r.left - contentTab.r.right)
-                        );
+                            Math.abs(a.r.cy - r.cy) -
+                            Math.abs(b.r.cy - r.cy)
+                        )[0] || null;
 
-                    if (!attachmentTabs.length) continue;
-
-                    const attachmentTab = attachmentTabs[0];
-
-                    // Real task detail has 期間 / 進捗 immediately above these tabs.
-                    const upperItems = items.filter(item =>
-                        item.r.bottom <= contentTab.r.top + 5 &&
-                        item.r.top >= contentTab.r.top - 320 &&
-                        item.r.right >= contentTab.r.left - 120
-                    );
-
-                    const periodHit =
-                        exactOrShort(
-                            upperItems,
-                            /\\d{1,2}\\/\\d{1,2}.*～.*\\d{1,2}\\/\\d{1,2}/,
-                            220
-                        ) ||
-                        exactOrShort(
-                            upperItems,
-                            /^期間(?:\\s|$)/,
-                            220
-                        );
-
-                    const progressLabel =
-                        exactOrShort(
-                            upperItems,
-                            /^進捗(?:\\s|$)/,
-                            120
-                        );
-
-                    const titleHit = items
+                    const nearbyPeriod = periodLabels
                         .filter(item =>
-                            item.text === taskName &&
-                            item.r.bottom <= contentTab.r.top + 5 &&
-                            item.r.top >= contentTab.r.top - 260
+                            item.r.cy < r.cy + 20 &&
+                            item.r.cy > r.cy - 160 &&
+                            Math.abs(item.r.left - (nearbyProgress?.r.left ?? r.left)) <= 260
                         )
-                        .sort((a, b) => b.r.left - a.r.left)[0] || null;
+                        .sort((a, b) =>
+                            Math.abs(b.r.cy - r.cy) -
+                            Math.abs(a.r.cy - r.cy)
+                        )[0] || null;
 
-                    let score = 0;
+                    const nearbyComment = commentFields
+                        .filter(item =>
+                            item.r.top > r.bottom &&
+                            item.r.top < r.bottom + 700
+                        )
+                        .sort((a, b) =>
+                            a.r.top - b.r.top
+                        )[0] || null;
 
-                    score += contentTab.r.left * 0.5;
-                    if (periodHit) score += 1000;
-                    if (progressLabel) score += 1000;
-                    if (titleHit) score += 1500;
+                    let score = r.left * 5;
+
+                    if (nearbyProgress) score += 10000;
+                    if (nearbyPeriod) score += 2500;
+                    if (nearbyComment) score += 2500;
+
+                    // A task percent select normally has several percent options.
+                    score += percentages.length * 20;
 
                     if (!chosen || score > chosen.score) {
                         chosen = {
                             entry,
-                            items,
-                            contentTab,
-                            attachmentTab,
-                            periodHit,
-                            progressLabel,
-                            titleHit,
+                            select,
+                            selectRect: r,
+                            percentages,
+                            progressLabel: nearbyProgress,
+                            periodLabel: nearbyPeriod,
+                            commentField: nearbyComment,
+                            textNodes,
                             score
                         };
                     }
@@ -2788,62 +2831,143 @@ final class BrowserModel: ObservableObject {
 
             if (!chosen) {
                 return {
-                    status: 'detail-tabs-not-found'
+                    status: 'progress-pane-not-found'
                 };
             }
 
             const entry = chosen.entry;
             const d = entry.doc;
-            const items = chosen.items;
-            const contentTab = chosen.contentTab;
-            const attachmentTab = chosen.attachmentTab;
+            const select = chosen.select;
+            const selectRect = chosen.selectRect;
+            const textNodes = chosen.textNodes;
 
-            // Find the comment box. Its width tells us the real main content column,
-            // which excludes the member / 足あと sidebar on the right.
-            const commentFields = Array.from(
-                d.querySelectorAll('input,textarea')
+            const progressLabel = chosen.progressLabel;
+            const detailLeft = Math.max(
+                0,
+                (progressLabel?.r.left ?? selectRect.left) - 120
+            );
+
+            // Comment box is the cleanest bottom boundary of the content area.
+            let commentField = chosen.commentField;
+
+            if (!commentField) {
+                const comments = Array.from(
+                    d.querySelectorAll('input,textarea')
+                )
+                .filter(el => visible(entry, el))
+                .map(el => ({
+                    el,
+                    placeholder: clean(
+                        el.getAttribute('placeholder') || ''
+                    ),
+                    r: rect(entry, el)
+                }))
+                .filter(item =>
+                    /コメント/.test(item.placeholder) &&
+                    item.r.top > selectRect.bottom &&
+                    item.r.left >= detailLeft - 80
+                )
+                .sort((a, b) =>
+                    a.r.top - b.r.top
+                );
+
+                commentField = comments[0] || null;
+            }
+
+            // Exact period string in the same right-side area.
+            const periodCandidates = textNodes
+                .filter(item =>
+                    item.r.left >= detailLeft - 100 &&
+                    item.r.top < selectRect.top + 40 &&
+                    item.r.top > selectRect.top - 220 &&
+                    /\\d{1,2}\\/\\d{1,2}.*～.*\\d{1,2}\\/\\d{1,2}/.test(item.text) &&
+                    item.text.length <= 240
+                )
+                .sort((a, b) => {
+                    if (a.text.length !== b.text.length) {
+                        return a.text.length - b.text.length;
+                    }
+
+                    return b.r.left - a.r.left;
+                });
+
+            const period =
+                periodCandidates[0]?.text ||
+                chosen.periodLabel?.text ||
+                '';
+
+            const selectedText = clean(
+                select.selectedOptions?.[0]?.textContent ||
+                select.options?.[select.selectedIndex]?.textContent ||
+                ''
+            );
+
+            let progress = \(task.progress);
+            const selectedMatch = selectedText.match(
+                /(\\d{1,3})\\s*%/
+            );
+
+            if (selectedMatch) {
+                progress = Math.max(
+                    0,
+                    Math.min(100, Number(selectedMatch[1]))
+                );
+            }
+
+            const progressOptions = Array.from(
+                new Set(chosen.percentages)
+            ).sort((a, b) => a - b);
+
+            // Status select is usually immediately to the left of the % select.
+            let statusText = '';
+
+            const nearbySelects = Array.from(
+                d.querySelectorAll('select')
             )
             .filter(el => visible(entry, el))
             .map(el => ({
                 el,
-                placeholder: clean(
-                    el.getAttribute('placeholder') || ''
-                ),
                 r: rect(entry, el)
             }))
             .filter(item =>
-                /コメント/.test(item.placeholder) &&
-                item.r.top > contentTab.r.bottom - 5
+                Math.abs(item.r.cy - selectRect.cy) <= 35 &&
+                item.r.left < selectRect.left &&
+                item.r.left > selectRect.left - 320
             )
             .sort((a, b) =>
-                Math.abs(a.r.left - contentTab.r.left) -
-                Math.abs(b.r.left - contentTab.r.left)
+                b.r.left - a.r.left
             );
 
-            const commentField = commentFields[0] || null;
+            for (const item of nearbySelects) {
+                if (percentValues(item.el).length >= 2) continue;
 
-            const mainLeft = commentField
-                ? commentField.r.left - 12
-                : contentTab.r.left - 12;
-
-            const mainRight = commentField
-                ? commentField.r.right + 12
-                : Math.max(
-                    attachmentTab.r.right + 500,
-                    contentTab.r.right + 700
+                const value = clean(
+                    item.el.selectedOptions?.[0]?.textContent ||
+                    item.el.options?.[item.el.selectedIndex]?.textContent ||
+                    ''
                 );
 
-            const lowerBound = Math.max(
-                contentTab.r.bottom,
-                attachmentTab.r.bottom
-            ) + 4;
+                if (value) {
+                    statusText = value;
+                    break;
+                }
+            }
 
+            // Content region:
+            // starts below the progress row; ends at the comment input.
+            const lowerBound = selectRect.bottom + 45;
             const upperBound = commentField
-                ? commentField.r.top - 5
-                : lowerBound + 300;
+                ? commentField.r.top - 6
+                : lowerBound + 420;
 
-            // Read actual visible text nodes from the content region.
-            // This avoids picking a giant parent DIV containing unrelated UI.
+            const mainLeft = commentField
+                ? commentField.r.left - 18
+                : detailLeft;
+
+            const mainRight = commentField
+                ? commentField.r.right + 18
+                : detailLeft + 1000;
+
             const walker = d.createTreeWalker(
                 d.body,
                 NodeFilter.SHOW_TEXT
@@ -2859,7 +2983,7 @@ final class BrowserModel: ObservableObject {
                 if (!parent || !visible(entry, parent)) continue;
 
                 const r = rect(entry, parent);
-                let value = clean(node.nodeValue || '');
+                const value = clean(node.nodeValue || '');
 
                 if (!value) continue;
 
@@ -2867,18 +2991,22 @@ final class BrowserModel: ObservableObject {
                 if (r.right < mainLeft || r.left > mainRight) continue;
 
                 if (
+                    value === taskName ||
                     value === '内容' ||
                     /^添付ファイル/.test(value) ||
                     value === '添付する' ||
                     /^\\d+ファイル$/.test(value) ||
                     value === '全て表示' ||
-                    /コメント/.test(value)
+                    /コメント/.test(value) ||
+                    /^(メンバー|あしあと|一覧)$/.test(value) ||
+                    /^(コピーする|変更する|削除する)$/.test(value)
                 ) {
                     continue;
                 }
 
+                // Ignore tiny UI/status fragments.
                 if (
-                    /^(メンバー|あしあと|コピーする|変更する|削除する)$/.test(value)
+                    /^(期間|進捗|登録|更新|最終更新)$/.test(value)
                 ) {
                     continue;
                 }
@@ -2889,154 +3017,74 @@ final class BrowserModel: ObservableObject {
                 }
             }
 
-            const content = contentParts.join('\\n').trim();
+            const content = contentParts
+                .join('\\n')
+                .trim();
 
-            // Period.
-            const upperItems = items.filter(item =>
-                item.r.bottom <= contentTab.r.top + 5 &&
-                item.r.top >= contentTab.r.top - 340 &&
-                item.r.right >= contentTab.r.left - 160
-            );
+            const attachmentItem = textNodes
+                .filter(item =>
+                    /^添付ファイル/.test(item.text) &&
+                    item.r.top > selectRect.bottom &&
+                    item.r.top < upperBound &&
+                    item.r.left >= mainLeft - 80
+                )
+                .sort((a, b) =>
+                    a.r.top - b.r.top
+                )[0] || null;
 
-            const periodItem =
-                exactOrShort(
-                    upperItems,
-                    /\\d{1,2}\\/\\d{1,2}.*～.*\\d{1,2}\\/\\d{1,2}/,
-                    240
-                ) ||
-                exactOrShort(
-                    upperItems,
-                    /^期間(?:\\s|$)/,
-                    240
-                );
+            const attachmentInfo =
+                attachmentItem?.text || '';
 
-            const period = periodItem?.text || '';
+            // Update metadata near top.
+            const lastUpdated = textNodes
+                .filter(item =>
+                    /最終更新/.test(item.text) &&
+                    item.r.left >= detailLeft - 100 &&
+                    item.r.top > selectRect.top - 100 &&
+                    item.r.top < lowerBound
+                )
+                .sort((a, b) =>
+                    a.text.length - b.text.length
+                )[0]?.text || '';
 
-            // Progress label + selects on the same visual row.
-            const progressLabel =
-                chosen.progressLabel ||
-                exactOrShort(
-                    upperItems,
-                    /^進捗(?:\\s|$)/,
-                    140
-                );
+            const registeredBy = textNodes
+                .filter(item =>
+                    /^登録/.test(item.text) &&
+                    item.r.left >= detailLeft - 100 &&
+                    item.r.top < lowerBound &&
+                    item.text.length <= 180
+                )
+                .sort((a, b) =>
+                    a.text.length - b.text.length
+                )[0]?.text || '';
 
-            let progress = \(task.progress);
-            let progressOptions = [];
-            let statusText = '';
-            let progressSelectCount = 0;
+            const updatedBy = textNodes
+                .filter(item =>
+                    /^更新/.test(item.text) &&
+                    item.r.left >= detailLeft - 100 &&
+                    item.r.top < lowerBound &&
+                    item.text.length <= 180
+                )
+                .sort((a, b) =>
+                    a.text.length - b.text.length
+                )[0]?.text || '';
 
-            const allSelects = Array.from(
-                d.querySelectorAll('select')
-            )
-            .filter(el => visible(entry, el))
-            .map(el => ({
-                el,
-                r: rect(entry, el)
-            }));
-
-            let candidateSelects = allSelects;
-
-            if (progressLabel) {
-                candidateSelects = allSelects.filter(item =>
-                    Math.abs(item.r.cy - progressLabel.r.cy) <= 36 &&
-                    item.r.left >= progressLabel.r.left - 20
-                );
-            }
-
-            for (const item of candidateSelects) {
-                const select = item.el;
-                const options = Array.from(select.options || []);
-
-                const percentOptions = options
-                    .map(option => {
-                        const optionText = clean(option.textContent);
-                        const m = optionText.match(/^(\\d{1,3})\\s*%$/);
-
-                        return m ? Number(m[1]) : null;
-                    })
-                    .filter(value =>
-                        value !== null &&
-                        value >= 0 &&
-                        value <= 100
-                    );
-
-                if (percentOptions.length >= 2) {
-                    progressSelectCount += 1;
-
-                    progressOptions = Array.from(
-                        new Set(percentOptions)
-                    ).sort((a, b) => a - b);
-
-                    const selectedText = clean(
-                        select.selectedOptions?.[0]?.textContent ||
-                        select.options?.[select.selectedIndex]?.textContent ||
-                        ''
-                    );
-
-                    const m = selectedText.match(
-                        /(\\d{1,3})\\s*%/
-                    );
-
-                    if (m) {
-                        progress = Math.max(
-                            0,
-                            Math.min(100, Number(m[1]))
-                        );
-                    }
-
-                    continue;
-                }
-
-                if (!statusText && options.length > 1) {
-                    const selectedText = clean(
-                        select.selectedOptions?.[0]?.textContent ||
-                        select.options?.[select.selectedIndex]?.textContent ||
-                        ''
-                    );
-
-                    if (
-                        selectedText &&
-                        !/^\\d{1,3}\\s*%$/.test(selectedText)
-                    ) {
-                        statusText = selectedText;
-                    }
-                }
-            }
-
-            const lastUpdated =
-                exactOrShort(
-                    upperItems,
-                    /最終更新/,
-                    220
-                )?.text || '';
-
-            const registeredBy =
-                exactOrShort(
-                    upperItems,
-                    /^登録(?:\\s|$)/,
-                    180
-                )?.text || '';
-
-            const updatedBy =
-                exactOrShort(
-                    upperItems,
-                    /^更新(?:\\s|$)/,
-                    180
-                )?.text || '';
-
-            // Members.
+            // Members are normally to the right of the main content column.
             let members = [];
 
-            const memberHeading = items
+            const memberHeading = textNodes
                 .filter(item =>
                     /^メンバー(?:\\s|$)/.test(item.text) &&
-                    item.r.top >= contentTab.r.top - 20
+                    item.r.top > selectRect.bottom &&
+                    item.r.top < upperBound + 350
                 )
-                .sort((a, b) => a.r.top - b.r.top)[0] || null;
+                .sort((a, b) =>
+                    b.r.left - a.r.left
+                )[0] || null;
 
             if (memberHeading) {
-                let memberRoot = memberHeading.el.parentElement;
+                let memberRoot =
+                    memberHeading.el.parentElement;
 
                 for (
                     let depth = 0;
@@ -3059,15 +3107,17 @@ final class BrowserModel: ObservableObject {
                     );
 
                     if (names.length) {
-                        members = Array.from(new Set(names));
+                        members =
+                            Array.from(new Set(names));
                         break;
                     }
 
-                    memberRoot = memberRoot.parentElement;
+                    memberRoot =
+                        memberRoot.parentElement;
                 }
             }
 
-            // Find the TOP task-level "変更する", next to コピーする / 削除する.
+            // Detect the real task-level edit link.
             let canEditContent = false;
 
             const changeLinks = Array.from(
@@ -3075,19 +3125,30 @@ final class BrowserModel: ObservableObject {
             )
             .filter(el => visible(entry, el))
             .filter(el =>
-                clean(
-                    el.innerText ||
-                    el.value ||
-                    el.textContent
-                ) === '変更する'
+                /変更する/.test(
+                    clean(
+                        el.innerText ||
+                        el.value ||
+                        el.textContent
+                    )
+                )
             );
 
             for (const change of changeLinks) {
+                const cr = rect(entry, change);
+
+                if (
+                    cr.top > lowerBound + 80 ||
+                    cr.left < detailLeft
+                ) {
+                    continue;
+                }
+
                 let root = change.parentElement;
 
                 for (
                     let depth = 0;
-                    root && depth < 4;
+                    root && depth < 5;
                     depth++
                 ) {
                     const rootText = clean(
@@ -3120,11 +3181,12 @@ final class BrowserModel: ObservableObject {
                 updatedBy,
                 content,
                 members,
-                attachmentInfo: attachmentTab.text,
+                attachmentInfo,
                 canEditContent,
                 debug:
-                    `tabX:${Math.round(contentTab.r.left)} ` +
-                    `progressSelect:${progressSelectCount} ` +
+                    `progressX:${Math.round(selectRect.left)} ` +
+                    `options:${progressOptions.length} ` +
+                    `comment:${commentField ? 1 : 0} ` +
                     `content:${content.length} ` +
                     `edit:${canEditContent ? 1 : 0}`
             };
