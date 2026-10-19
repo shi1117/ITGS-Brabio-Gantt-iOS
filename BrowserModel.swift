@@ -671,10 +671,10 @@ final class BrowserModel: ObservableObject {
                 function isScheduleOrMetadata(value) {
                     const name = cleanName(value);
 
-                    if (/^\d+\s*営業日$/i.test(name)) return true;
-                    if (/^\d{1,2}\/\d{1,2}\s*\([^)]+\)$/i.test(name)) return true;
-                    if (/^\d{1,2}月\d{1,2}日(?:\s*\([^)]+\))?$/i.test(name)) return true;
-                    if (/^\d{1,3}\s*%$/i.test(name)) return true;
+                    if (/^\\d+\\s*営業日$/i.test(name)) return true;
+                    if (/^\\d{1,2}\\/\\d{1,2}\\s*\\([^)]+\\)$/i.test(name)) return true;
+                    if (/^\\d{1,2}月\\d{1,2}日(?:\\s*\\([^)]+\\))?$/i.test(name)) return true;
+                    if (/^\\d{1,3}\\s*%$/i.test(name)) return true;
                     if (/^(登録|更新|期間|進捗|最終更新|メンバー|あしあと)$/i.test(name)) return true;
                     if (/@/.test(name)) return true;
 
