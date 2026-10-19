@@ -317,126 +317,199 @@ final class BrowserModel: ObservableObject {
                     .trim();
             }
 
-            const entries = collectDocs(document);
-            let marker = null;
+            function markerBlob(el) {
+                return [
+                    text(el),
+                    el.id || '',
+                    typeof el.className === 'string' ? el.className : '',
+                    el.getAttribute('title') || '',
+                    el.getAttribute('alt') || '',
+                    el.getAttribute('src') || '',
+                    el.getAttribute('name') || '',
+                    el.getAttribute('aria-label') || '',
+                    el.getAttribute('data-state') || '',
+                    el.getAttribute('data-expanded') || '',
+                    el.getAttribute('onclick') || ''
+                ].join(' ').toLowerCase();
+            }
 
-            for (const entry of entries) {
-                for (const el of Array.from(
-                    entry.doc.querySelectorAll('a,span,td,div')
-                )) {
-                    if (!visible(entry, el)) continue;
-                    if (text(el) !== targetName) continue;
+            function classifyToggle(el) {
+                const aria =
+                    el.getAttribute('aria-expanded') ??
+                    el.closest('[aria-expanded]')?.getAttribute('aria-expanded');
 
-                    const r = rect(entry, el);
-                    const area = r.width * r.height;
+                if (aria === 'true') {
+                    return 'expanded';
+                }
 
-                    if (
-                        marker === null ||
-                        r.left < marker.r.left - 8 ||
-                        (
-                            Math.abs(r.left - marker.r.left) <= 8 &&
-                            area < marker.area
-                        )
-                    ) {
-                        marker = { entry, el, r, area };
+                if (aria === 'false') {
+                    return 'collapsed';
+                }
+
+                const symbol = text(el).trim();
+                const blob = markerBlob(el);
+
+                if (
+                    symbol === '+' ||
+                    symbol === '＋' ||
+                    /(^|[^a-z])(plus|expand|expanded-off|closed|close-tree|folded)([^a-z]|$)/i.test(blob) ||
+                    /tree[^ ]*(plus|close)/i.test(blob)
+                ) {
+                    return 'collapsed';
+                }
+
+                if (
+                    symbol === '-' ||
+                    symbol === '−' ||
+                    symbol === '－' ||
+                    /(^|[^a-z])(minus|collapse|opened|open-tree|unfolded)([^a-z]|$)/i.test(blob) ||
+                    /tree[^ ]*(minus|open)/i.test(blob)
+                ) {
+                    return 'expanded';
+                }
+
+                return 'unknown';
+            }
+
+            function findProjectMarker(entries) {
+                let marker = null;
+
+                for (const entry of entries) {
+                    for (const el of Array.from(
+                        entry.doc.querySelectorAll('a,[onclick],span,td,div')
+                    )) {
+                        if (!visible(entry, el)) continue;
+                        if (text(el) !== targetName) continue;
+
+                        const r = rect(entry, el);
+                        const area = r.width * r.height;
+
+                        let quality = 0;
+                        if (el.tagName === 'A') quality += 100;
+                        if (el.closest('a')) quality += 50;
+                        if (el.hasAttribute('onclick')) quality += 25;
+                        if (r.width <= 420) quality += 10;
+
+                        if (
+                            marker === null ||
+                            quality > marker.quality ||
+                            (
+                                quality === marker.quality &&
+                                r.left < marker.r.left - 8
+                            ) ||
+                            (
+                                quality === marker.quality &&
+                                Math.abs(r.left - marker.r.left) <= 8 &&
+                                area < marker.area
+                            )
+                        ) {
+                            marker = {
+                                entry,
+                                el,
+                                r,
+                                area,
+                                quality
+                            };
+                        }
                     }
                 }
+
+                return marker;
             }
+
+            function findToggle(marker) {
+                const entry = marker.entry;
+                const projectX = marker.r.left;
+                const projectY = marker.r.cy;
+                const candidates = [];
+
+                for (const el of Array.from(
+                    entry.doc.querySelectorAll(
+                        'img,input[type="image"],button,a,[onclick],span,div'
+                    )
+                )) {
+                    if (!visible(entry, el)) continue;
+
+                    const r = rect(entry, el);
+
+                    if (Math.abs(r.cy - projectY) > 18) continue;
+                    if (r.right > projectX + 12) continue;
+                    if (r.left < projectX - 125) continue;
+                    if (r.width < 5 || r.width > 44) continue;
+                    if (r.height < 5 || r.height > 44) continue;
+
+                    const state = classifyToggle(el);
+                    let score = 0;
+
+                    if (state !== 'unknown') score += 500;
+                    if (el.tagName === 'IMG') score += 40;
+                    if (el.tagName === 'INPUT') score += 35;
+                    if (el.closest('a,button,[onclick]')) score += 25;
+
+                    score -= Math.abs(projectX - r.right) * 0.5;
+                    score -= Math.abs(projectY - r.cy) * 0.7;
+
+                    candidates.push({
+                        el,
+                        r,
+                        state,
+                        score,
+                        blob: markerBlob(el)
+                    });
+                }
+
+                candidates.sort((a, b) => b.score - a.score);
+
+                return candidates[0] || null;
+            }
+
+            const entries = collectDocs(document);
+            const marker = findProjectMarker(entries);
 
             if (!marker) {
                 return {
                     status: 'project-not-found',
-                    expanded: false
+                    toggleState: 'none',
+                    clicked: false
                 };
             }
 
-            const entry = marker.entry;
-            const projectX = marker.r.left;
-            const projectY = marker.r.cy;
+            const toggle = findToggle(marker);
 
-            // Determine whether task rows are already visible directly below this project.
-            let hasChildren = false;
-
-            for (const el of Array.from(
-                entry.doc.querySelectorAll('a,span,td,div')
-            )) {
-                if (!visible(entry, el)) continue;
-
-                const r = rect(entry, el);
-                const t = text(el);
-
-                if (r.cy <= projectY + 4 || r.cy > projectY + 900) continue;
-                if (r.left < projectX + 10 || r.left > projectX + 430) continue;
-                if (r.height < 8 || r.height > 48) continue;
-                if (!t || t.length < 2 || t.length > 100) continue;
-
-                hasChildren = true;
-                break;
+            if (!toggle) {
+                return {
+                    status: 'toggle-not-found',
+                    toggleState: 'none',
+                    clicked: false
+                };
             }
 
-            let clickedExpand = false;
+            if (toggle.state === 'collapsed') {
+                const clickable =
+                    toggle.el.closest('a,button,[onclick]') ||
+                    toggle.el;
 
-            if (!hasChildren) {
-                const controls = [];
+                try {
+                    clickable.click();
 
-                for (const el of Array.from(
-                    entry.doc.querySelectorAll('img,a,button,input,span,div')
-                )) {
-                    if (!visible(entry, el)) continue;
-
-                    const r = rect(entry, el);
-
-                    if (Math.abs(r.cy - projectY) > 16) continue;
-                    if (r.right > projectX + 10) continue;
-                    if (r.left < projectX - 120) continue;
-                    if (r.width < 6 || r.width > 42) continue;
-                    if (r.height < 6 || r.height > 42) continue;
-
-                    const blob = [
-                        text(el),
-                        el.id || '',
-                        typeof el.className === 'string' ? el.className : '',
-                        el.getAttribute('title') || '',
-                        el.getAttribute('alt') || '',
-                        el.getAttribute('src') || '',
-                        el.getAttribute('name') || ''
-                    ].join(' ').toLowerCase();
-
-                    let score = 0;
-
-                    if (/(plus|expand|closed|tree.*plus)/i.test(blob)) {
-                        score += 150;
-                    }
-
-                    if (/(minus|collapse|opened|tree.*minus)/i.test(blob)) {
-                        score -= 150;
-                    }
-
-                    if (el.tagName === 'IMG') score += 20;
-                    if (el.closest('a,button,[onclick]')) score += 15;
-
-                    score -= Math.abs(projectX - r.right) * 0.2;
-
-                    controls.push({ el, score });
-                }
-
-                controls.sort((a, b) => b.score - a.score);
-
-                const control = controls.find(x => x.score > 10);
-
-                if (control) {
-                    const clickable =
-                        control.el.closest('a,button,[onclick]') ||
-                        control.el;
-
-                    try {
-                        clickable.click();
-                        clickedExpand = true;
-                    } catch (_) {}
+                    return {
+                        status: 'expand-clicked',
+                        toggleState: 'collapsed',
+                        clicked: true,
+                        marker: toggle.blob
+                    };
+                } catch (_) {
+                    return {
+                        status: 'expand-click-failed',
+                        toggleState: 'collapsed',
+                        clicked: false,
+                        marker: toggle.blob
+                    };
                 }
             }
 
-            // Select/activate the exact project row, but never collapse other projects.
+            // Select/activate the exact project row. Do not touch the toggle
+            // if it is already "-" / expanded.
             const directLink =
                 marker.el.closest('a,button,[onclick]') ||
                 marker.el.querySelector?.('a,button,[onclick]');
@@ -448,8 +521,13 @@ final class BrowserModel: ObservableObject {
             }
 
             return {
-                status: 'selected',
-                expanded: hasChildren || clickedExpand
+                status:
+                    toggle.state === 'expanded'
+                    ? 'already-expanded'
+                    : 'toggle-unknown',
+                toggleState: toggle.state,
+                clicked: false,
+                marker: toggle.blob
             };
         })();
         """
@@ -462,16 +540,31 @@ final class BrowserModel: ObservableObject {
                 let status = object?["status"] as? String ?? "unknown"
 
                 if status == "project-not-found" {
-                    self.syncState = .failed("找不到「\(project.name)」的 Brabio 專案列")
+                    self.syncState = .failed(
+                        "找不到「\(project.name)」的 Brabio 專案列"
+                    )
                     return
                 }
 
-                try? await Task.sleep(
-                    nanoseconds: UInt64(
-                        850_000_000 + min(attempt, 3) * 250_000_000
+                if status == "expand-click-failed" {
+                    self.syncState = .failed(
+                        "無法展開「\(project.name)」"
                     )
-                )
+                    return
+                }
 
+                if status == "expand-clicked", attempt < 3 {
+                    // Wait for the old Brabio tree to redraw, then verify that
+                    // the same icon has really changed from "+" to "-".
+                    try? await Task.sleep(nanoseconds: 650_000_000)
+                    self.prepareSelectedProject(
+                        project,
+                        attempt: attempt + 1
+                    )
+                    return
+                }
+
+                try? await Task.sleep(nanoseconds: 650_000_000)
                 self.extractTasks(attempt: 0)
             }
         }
@@ -1505,16 +1598,304 @@ final class BrowserModel: ObservableObject {
 
 
     func openTaskDetail(_ task: GanttTask) {
-        guard let webView else {
-            taskDetailMessage = "Brabio 尚未連線"
-            return
-        }
-
         activeTaskDetail = nil
         taskDetailLoading = true
         taskProgressSaving = false
         taskContentSaving = false
         taskDetailMessage = nil
+
+        ensureProjectExpandedForTask(task, attempt: 0)
+    }
+
+    private func ensureProjectExpandedForTask(
+        _ task: GanttTask,
+        attempt: Int
+    ) {
+        guard let webView else {
+            taskDetailLoading = false
+            taskDetailMessage = "Brabio 尚未連線"
+            return
+        }
+
+        let projectNameJSON =
+            jsonLiteral(selectedProject?.name ?? "")
+
+        let js = """
+        (function() {
+            const projectName = \(projectNameJSON);
+
+            function docs(root, offsetX = 0, offsetY = 0) {
+                const out = [{ doc: root, offsetX, offsetY }];
+
+                for (const frame of Array.from(root.querySelectorAll('iframe,frame'))) {
+                    try {
+                        if (!frame.contentDocument) continue;
+
+                        const r = frame.getBoundingClientRect();
+
+                        out.push(
+                            ...docs(
+                                frame.contentDocument,
+                                offsetX + r.left,
+                                offsetY + r.top
+                            )
+                        );
+                    } catch (_) {}
+                }
+
+                return out;
+            }
+
+            function visible(entry, el) {
+                if (!el) return false;
+
+                const w = entry.doc.defaultView || window;
+                const s = w.getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+
+                return r.width > 0 &&
+                       r.height > 0 &&
+                       s.display !== 'none' &&
+                       s.visibility !== 'hidden';
+            }
+
+            function rect(entry, el) {
+                const r = el.getBoundingClientRect();
+
+                return {
+                    left: r.left + entry.offsetX,
+                    right: r.right + entry.offsetX,
+                    top: r.top + entry.offsetY,
+                    bottom: r.bottom + entry.offsetY,
+                    width: r.width,
+                    height: r.height,
+                    cx: r.left + entry.offsetX + r.width / 2,
+                    cy: r.top + entry.offsetY + r.height / 2
+                };
+            }
+
+            function text(el) {
+                return (el.innerText || el.textContent || '')
+                    .replace(/\\s+/g, ' ')
+                    .trim();
+            }
+
+            function blob(el) {
+                return [
+                    text(el),
+                    el.id || '',
+                    typeof el.className === 'string' ? el.className : '',
+                    el.getAttribute('title') || '',
+                    el.getAttribute('alt') || '',
+                    el.getAttribute('src') || '',
+                    el.getAttribute('name') || '',
+                    el.getAttribute('aria-label') || '',
+                    el.getAttribute('data-state') || '',
+                    el.getAttribute('data-expanded') || '',
+                    el.getAttribute('onclick') || ''
+                ].join(' ').toLowerCase();
+            }
+
+            function classify(el) {
+                const aria =
+                    el.getAttribute('aria-expanded') ??
+                    el.closest('[aria-expanded]')?.getAttribute('aria-expanded');
+
+                if (aria === 'true') return 'expanded';
+                if (aria === 'false') return 'collapsed';
+
+                const symbol = text(el).trim();
+                const value = blob(el);
+
+                if (
+                    symbol === '+' ||
+                    symbol === '＋' ||
+                    /(^|[^a-z])(plus|expand|expanded-off|closed|close-tree|folded)([^a-z]|$)/i.test(value) ||
+                    /tree[^ ]*(plus|close)/i.test(value)
+                ) {
+                    return 'collapsed';
+                }
+
+                if (
+                    symbol === '-' ||
+                    symbol === '−' ||
+                    symbol === '－' ||
+                    /(^|[^a-z])(minus|collapse|opened|open-tree|unfolded)([^a-z]|$)/i.test(value) ||
+                    /tree[^ ]*(minus|open)/i.test(value)
+                ) {
+                    return 'expanded';
+                }
+
+                return 'unknown';
+            }
+
+            const entries = docs(document);
+            let marker = null;
+
+            for (const entry of entries) {
+                for (const el of Array.from(
+                    entry.doc.querySelectorAll('a,[onclick],span,td,div')
+                )) {
+                    if (!visible(entry, el)) continue;
+                    if (text(el) !== projectName) continue;
+
+                    const r = rect(entry, el);
+                    const area = r.width * r.height;
+
+                    let quality = 0;
+                    if (el.tagName === 'A') quality += 100;
+                    if (el.closest('a')) quality += 50;
+                    if (el.hasAttribute('onclick')) quality += 25;
+
+                    if (
+                        !marker ||
+                        quality > marker.quality ||
+                        (
+                            quality === marker.quality &&
+                            r.left < marker.r.left - 8
+                        ) ||
+                        (
+                            quality === marker.quality &&
+                            Math.abs(r.left - marker.r.left) <= 8 &&
+                            area < marker.area
+                        )
+                    ) {
+                        marker = {
+                            entry,
+                            el,
+                            r,
+                            area,
+                            quality
+                        };
+                    }
+                }
+            }
+
+            if (!marker) {
+                return {
+                    status: 'project-not-found',
+                    state: 'none'
+                };
+            }
+
+            const candidates = [];
+
+            for (const el of Array.from(
+                marker.entry.doc.querySelectorAll(
+                    'img,input[type="image"],button,a,[onclick],span,div'
+                )
+            )) {
+                if (!visible(marker.entry, el)) continue;
+
+                const r = rect(marker.entry, el);
+
+                if (Math.abs(r.cy - marker.r.cy) > 18) continue;
+                if (r.right > marker.r.left + 12) continue;
+                if (r.left < marker.r.left - 125) continue;
+                if (r.width < 5 || r.width > 44) continue;
+                if (r.height < 5 || r.height > 44) continue;
+
+                const state = classify(el);
+                let score = 0;
+
+                if (state !== 'unknown') score += 500;
+                if (el.tagName === 'IMG') score += 40;
+                if (el.tagName === 'INPUT') score += 35;
+                if (el.closest('a,button,[onclick]')) score += 25;
+
+                score -= Math.abs(marker.r.left - r.right) * 0.5;
+                score -= Math.abs(marker.r.cy - r.cy) * 0.7;
+
+                candidates.push({
+                    el,
+                    state,
+                    score
+                });
+            }
+
+            candidates.sort((a, b) => b.score - a.score);
+            const toggle = candidates[0];
+
+            if (!toggle) {
+                return {
+                    status: 'toggle-not-found',
+                    state: 'none'
+                };
+            }
+
+            if (toggle.state === 'collapsed') {
+                const clickable =
+                    toggle.el.closest('a,button,[onclick]') ||
+                    toggle.el;
+
+                try {
+                    clickable.click();
+
+                    return {
+                        status: 'expand-clicked',
+                        state: 'collapsed'
+                    };
+                } catch (_) {
+                    return {
+                        status: 'expand-failed',
+                        state: 'collapsed'
+                    };
+                }
+            }
+
+            return {
+                status:
+                    toggle.state === 'expanded'
+                    ? 'expanded'
+                    : 'unknown',
+                state: toggle.state
+            };
+        })();
+        """
+
+        webView.evaluateJavaScript(js) { [weak self] result, _ in
+            Task { @MainActor in
+                guard let self else { return }
+
+                let object = result as? [String: Any]
+                let status = object?["status"] as? String ?? "unknown"
+
+                if status == "project-not-found" {
+                    self.taskDetailLoading = false
+                    self.taskDetailMessage =
+                        "找不到目前專案的 Brabio 樹狀列"
+                    return
+                }
+
+                if status == "expand-failed" {
+                    self.taskDetailLoading = false
+                    self.taskDetailMessage =
+                        "Brabio 專案旁的「+」無法展開"
+                    return
+                }
+
+                if status == "expand-clicked", attempt < 3 {
+                    try? await Task.sleep(nanoseconds: 650_000_000)
+
+                    self.ensureProjectExpandedForTask(
+                        task,
+                        attempt: attempt + 1
+                    )
+                    return
+                }
+
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                self.clickTaskAndReadDetail(task)
+            }
+        }
+    }
+
+    private func clickTaskAndReadDetail(_ task: GanttTask) {
+        guard let webView else {
+            taskDetailLoading = false
+            taskDetailMessage = "Brabio 尚未連線"
+            return
+        }
 
         let taskNameJSON = jsonLiteral(task.name)
         let projectNameJSON = jsonLiteral(selectedProject?.name ?? "")
@@ -1593,7 +1974,9 @@ final class BrowserModel: ObservableObject {
                 .map(el => ({
                     el,
                     r: rect(entry, el),
-                    area: rect(entry, el).width * rect(entry, el).height
+                    area:
+                        rect(entry, el).width *
+                        rect(entry, el).height
                 }))
                 .sort((a, b) => {
                     if (Math.abs(a.r.left - b.r.left) > 8) {
@@ -1614,7 +1997,13 @@ final class BrowserModel: ObservableObject {
                     if (!visible(entry, el)) continue;
 
                     const name = text(el);
-                    if (!projectNames.has(name) || name === projectName) continue;
+
+                    if (
+                        !projectNames.has(name) ||
+                        name === projectName
+                    ) {
+                        continue;
+                    }
 
                     const r = rect(entry, el);
 
@@ -1639,6 +2028,7 @@ final class BrowserModel: ObservableObject {
                     if (r.left > project.r.left + 500) continue;
 
                     let quality = 0;
+
                     if (el.tagName === 'A') quality += 100;
                     if (el.closest('a')) quality += 50;
                     if (el.hasAttribute('onclick')) quality += 25;
@@ -1696,12 +2086,12 @@ final class BrowserModel: ObservableObject {
                     self.taskDetailLoading = false
                     self.taskDetailMessage =
                         status == "task-not-found"
-                        ? "找不到這個 Brabio 任務"
+                        ? "找不到這個 Brabio 任務；請確認專案已展開"
                         : "無法開啟任務"
                     return
                 }
 
-                try? await Task.sleep(nanoseconds: 750_000_000)
+                try? await Task.sleep(nanoseconds: 800_000_000)
                 self.readTaskDetail(task)
             }
         }
@@ -1771,98 +2161,109 @@ final class BrowserModel: ObservableObject {
                     .trim();
             }
 
-            function detailRoot(d) {
-                const titles = Array.from(
-                    d.querySelectorAll('h1,h2,h3,strong,a,span,div,td')
+            for (const d of docs(document)) {
+                const titleHits = Array.from(
+                    d.querySelectorAll(
+                        'h1,h2,h3,strong,a,span,div,td'
+                    )
                 )
-                .filter(el => visible(d, el))
                 .filter(el =>
-                    clean(el.innerText || el.textContent) === taskName
+                    visible(d, el) &&
+                    clean(
+                        el.innerText ||
+                        el.textContent
+                    ) === taskName
                 )
                 .map(el => ({
                     el,
                     r: el.getBoundingClientRect()
                 }))
-                .sort((a, b) => b.r.left - a.r.left);
+                .sort((a, b) =>
+                    b.r.left - a.r.left
+                );
 
-                for (const title of titles) {
-                    let root = title.el;
+                if (!titleHits.length) continue;
 
-                    for (let depth = 0; root && depth < 10; depth++) {
-                        const text = clean(root.innerText || root.textContent);
-                        const r = root.getBoundingClientRect();
-
-                        const hits = [
-                            /期間/.test(text),
-                            /進捗/.test(text),
-                            /内容/.test(text),
-                            /添付ファイル/.test(text)
-                        ].filter(Boolean).length;
-
-                        if (
-                            hits >= 2 &&
-                            r.width >= 450 &&
-                            r.height >= 150
-                        ) {
-                            return root;
-                        }
-
-                        root = root.parentElement;
-                    }
-                }
-
-                return null;
-            }
-
-            for (const d of docs(document)) {
-                const root = detailRoot(d);
-                if (!root) continue;
+                const titleLeft = titleHits[0].r.left;
 
                 const selects = Array.from(
-                    root.querySelectorAll('select')
-                ).filter(el => visible(d, el));
+                    d.querySelectorAll('select')
+                )
+                .filter(el =>
+                    visible(d, el) &&
+                    el.getBoundingClientRect().left
+                        >= titleLeft - 100
+                );
 
                 for (const select of selects) {
-                    const options = Array.from(select.options || []);
-                    const percentOptions = options.filter(option =>
-                        /^\\s*\\d{1,3}\\s*%\\s*$/.test(
-                            option.textContent || ''
-                        )
+                    const options = Array.from(
+                        select.options || []
                     );
 
-                    if (percentOptions.length < 2) continue;
+                    const percentOptions = options.filter(
+                        option =>
+                            /^\\s*\\d{1,3}\\s*%\\s*$/.test(
+                                option.textContent || ''
+                            )
+                    );
 
-                    const exact = percentOptions.find(option => {
-                        const m = (option.textContent || '')
-                            .match(/(\\d{1,3})\\s*%/);
+                    if (percentOptions.length < 2) {
+                        continue;
+                    }
 
-                        return m && Number(m[1]) === \(target);
-                    });
+                    const exact = percentOptions.find(
+                        option => {
+                            const m =
+                                (option.textContent || '')
+                                .match(
+                                    /(\\d{1,3})\\s*%/
+                                );
+
+                            return (
+                                m &&
+                                Number(m[1])
+                                    === \(target)
+                            );
+                        }
+                    );
 
                     if (!exact) continue;
 
                     try {
                         const setter = Object
                             .getOwnPropertyDescriptor(
-                                d.defaultView.HTMLSelectElement.prototype,
+                                d.defaultView
+                                    .HTMLSelectElement
+                                    .prototype,
                                 'value'
                             )?.set;
 
                         if (setter) {
-                            setter.call(select, exact.value);
+                            setter.call(
+                                select,
+                                exact.value
+                            );
                         } else {
-                            select.value = exact.value;
+                            select.value =
+                                exact.value;
                         }
                     } catch (_) {
-                        select.value = exact.value;
+                        select.value =
+                            exact.value;
                     }
 
                     select.dispatchEvent(
-                        new Event('input', { bubbles: true })
+                        new Event(
+                            'input',
+                            { bubbles: true }
+                        )
                     );
 
                     select.dispatchEvent(
-                        new Event('change', { bubbles: true })
+                        new Event(
+                            'change',
+                            { bubbles: true }
+                        )
                     );
 
                     try {
@@ -1894,7 +2295,9 @@ final class BrowserModel: ObservableObject {
                 }
 
                 let object = result as? [String: Any]
-                let status = object?["status"] as? String ?? "unknown"
+                let status =
+                    object?["status"] as? String
+                    ?? "unknown"
 
                 guard status == "changed" else {
                     self.taskProgressSaving = false
@@ -1903,7 +2306,12 @@ final class BrowserModel: ObservableObject {
                     return
                 }
 
-                if let index = self.tasks.firstIndex(where: { $0.id == task.id }) {
+                if let index =
+                    self.tasks.firstIndex(
+                        where: {
+                            $0.id == task.id
+                        }
+                    ) {
                     let old = self.tasks[index]
 
                     self.tasks[index] = GanttTask(
@@ -1916,9 +2324,12 @@ final class BrowserModel: ObservableObject {
                     )
                 }
 
-                self.taskDetailMessage = "已送出 \(target)% 到 Brabio"
+                self.taskDetailMessage =
+                    "已送出 \(target)% 到 Brabio"
 
-                try? await Task.sleep(nanoseconds: 950_000_000)
+                try? await Task.sleep(
+                    nanoseconds: 950_000_000
+                )
 
                 self.taskProgressSaving = false
                 self.readTaskDetail(
@@ -2315,108 +2726,113 @@ final class BrowserModel: ObservableObject {
             }
 
             const entries = docs(document);
-            let selected = null;
+            let titleHit = null;
 
+            // Brabio shows the same task name twice:
+            // left tree + right detail title.
+            // The RIGHTMOST exact hit is the detail title we need.
             for (const entry of entries) {
-                const titles = Array.from(
+                for (const el of Array.from(
                     entry.doc.querySelectorAll(
                         'h1,h2,h3,strong,a,span,div,td'
                     )
-                )
-                .filter(el => visible(entry, el))
-                .filter(el =>
-                    clean(el.innerText || el.textContent) === taskName
-                )
-                .map(el => ({
-                    el,
-                    r: rect(entry, el)
-                }))
-                .sort((a, b) => b.r.left - a.r.left);
+                )) {
+                    if (!visible(entry, el)) continue;
 
-                for (const title of titles) {
-                    let root = title.el;
+                    const text = clean(
+                        el.innerText || el.textContent
+                    );
 
-                    for (let depth = 0; root && depth < 10; depth++) {
-                        const rootText = clean(
-                            root.innerText || root.textContent
-                        );
+                    if (text !== taskName) continue;
 
-                        const rr = rect(entry, root);
+                    const r = rect(entry, el);
 
-                        const hits = [
-                            /期間/.test(rootText),
-                            /進捗/.test(rootText),
-                            /内容/.test(rootText),
-                            /添付ファイル/.test(rootText)
-                        ].filter(Boolean).length;
+                    let quality = r.left * 10;
 
-                        if (
-                            hits >= 2 &&
-                            rr.width >= 450 &&
-                            rr.height >= 150
-                        ) {
-                            const score =
-                                title.r.left * 10 -
-                                rr.width * 0.05 -
-                                rr.height * 0.01;
+                    if (/^H[1-3]$/.test(el.tagName)) {
+                        quality += 5000;
+                    }
 
-                            if (!selected || score > selected.score) {
-                                selected = {
-                                    entry,
-                                    title,
-                                    root,
-                                    score
-                                };
-                            }
+                    if (r.width > 120) {
+                        quality += 500;
+                    }
 
-                            break;
-                        }
-
-                        root = root.parentElement;
+                    if (
+                        !titleHit ||
+                        quality > titleHit.quality
+                    ) {
+                        titleHit = {
+                            entry,
+                            el,
+                            r,
+                            quality
+                        };
                     }
                 }
             }
 
-            if (!selected) {
+            if (!titleHit) {
                 return {
-                    status: 'detail-root-not-found'
+                    status: 'detail-title-not-found'
                 };
             }
 
-            const entry = selected.entry;
+            const entry = titleHit.entry;
             const d = entry.doc;
-            const root = selected.root;
+            const titleLeft = titleHit.r.left;
+
+            // Everything materially to the right of the title's left edge belongs
+            // to the task detail pane. This is stable even though old Brabio
+            // splits the detail pane across several sibling containers.
+            function inDetailPane(el) {
+                if (!visible(entry, el)) return false;
+
+                const r = rect(entry, el);
+
+                return r.left >= titleLeft - 100;
+            }
 
             const nodes = Array.from(
-                root.querySelectorAll(
-                    'div,span,td,p,a,label,strong'
+                d.querySelectorAll(
+                    'div,span,td,p,a,label,strong,pre'
                 )
             )
-            .filter(el => visible(entry, el))
+            .filter(inDetailPane)
             .map(el => ({
                 el,
                 text: clean(el.innerText || el.textContent),
                 r: rect(entry, el)
             }));
 
-            function shortestMatching(regex, maxLength = 220) {
+            function shortestMatching(regex, maxLength = 260) {
                 return nodes
                     .filter(item =>
                         item.text.length > 0 &&
                         item.text.length <= maxLength &&
                         regex.test(item.text)
                     )
-                    .sort((a, b) => a.text.length - b.text.length)[0]?.text || '';
+                    .sort((a, b) => {
+                        if (a.text.length !== b.text.length) {
+                            return a.text.length - b.text.length;
+                        }
+
+                        return a.r.top - b.r.top;
+                    })[0]?.text || '';
             }
 
-            const period = shortestMatching(
-                /\\d{1,2}\\/\\d{1,2}.*～.*\\d{1,2}\\/\\d{1,2}/,
-                180
-            );
+            const period =
+                shortestMatching(
+                    /\\d{1,2}\\/\\d{1,2}.*～.*\\d{1,2}\\/\\d{1,2}/,
+                    180
+                ) ||
+                shortestMatching(
+                    /^期間\\s+.*\\d{1,2}\\/\\d{1,2}/,
+                    220
+                );
 
             const lastUpdated = shortestMatching(
                 /最終更新/,
-                180
+                220
             );
 
             const registeredBy = shortestMatching(
@@ -2429,9 +2845,11 @@ final class BrowserModel: ObservableObject {
                 180
             );
 
+            // Progress/status selects from the right task pane only.
             const selects = Array.from(
-                root.querySelectorAll('select')
-            ).filter(el => visible(entry, el));
+                d.querySelectorAll('select')
+            )
+            .filter(inDetailPane);
 
             let progress = \(task.progress);
             let progressOptions = [];
@@ -2444,6 +2862,7 @@ final class BrowserModel: ObservableObject {
                     .map(option => {
                         const optionText = clean(option.textContent);
                         const m = optionText.match(/^(\\d{1,3})\\s*%$/);
+
                         return m ? Number(m[1]) : null;
                     })
                     .filter(value =>
@@ -2463,7 +2882,9 @@ final class BrowserModel: ObservableObject {
                         ''
                     );
 
-                    const m = selectedText.match(/(\\d{1,3})\\s*%/);
+                    const m = selectedText.match(
+                        /(\\d{1,3})\\s*%/
+                    );
 
                     if (m) {
                         progress = Math.max(
@@ -2496,13 +2917,15 @@ final class BrowserModel: ObservableObject {
                 .sort((a, b) => a.r.top - b.r.top)[0];
 
             const attachmentTab = nodes
-                .filter(item => /^添付ファイル/.test(item.text))
+                .filter(item =>
+                    /^添付ファイル/.test(item.text)
+                )
                 .sort((a, b) => a.r.top - b.r.top)[0];
 
             const commentField = Array.from(
-                root.querySelectorAll('input,textarea')
+                d.querySelectorAll('input,textarea')
             )
-            .filter(el => visible(entry, el))
+            .filter(inDetailPane)
             .map(el => ({
                 el,
                 placeholder: clean(
@@ -2520,12 +2943,12 @@ final class BrowserModel: ObservableObject {
                 const lowerBound = contentTab.r.bottom + 3;
                 const upperBound = commentField
                     ? commentField.r.top - 4
-                    : lowerBound + 260;
+                    : lowerBound + 280;
 
                 const candidates = Array.from(
-                    root.querySelectorAll('div,td,p,pre')
+                    d.querySelectorAll('div,td,p,pre')
                 )
-                .filter(el => visible(entry, el))
+                .filter(inDetailPane)
                 .map(el => {
                     const r = rect(entry, el);
 
@@ -2550,21 +2973,28 @@ final class BrowserModel: ObservableObject {
                 .filter(item =>
                     item.r.top >= lowerBound &&
                     item.r.top < upperBound &&
-                    item.r.width >= 250 &&
+                    item.r.width >= 220 &&
                     item.r.height >= 18 &&
-                    item.r.height <= 220 &&
+                    item.r.height <= 240 &&
                     item.text.length >= 2 &&
-                    item.text.length <= 1200 &&
+                    item.text.length <= 1400 &&
                     item.text !== taskName &&
                     !/^(内容|添付ファイル|期間|進捗|登録|更新|最終更新|メンバー)/.test(item.text) &&
-                    !/コメントはありません/.test(item.text)
+                    !/コメントはありません/.test(item.text) &&
+                    !/コピーする.*変更する.*削除する/.test(item.text)
                 )
                 .sort((a, b) => {
-                    const dy =
-                        Math.abs(a.r.top - lowerBound) -
+                    const aDistance =
+                        Math.abs(a.r.top - lowerBound);
+
+                    const bDistance =
                         Math.abs(b.r.top - lowerBound);
 
-                    if (Math.abs(dy) > 4) return dy;
+                    if (
+                        Math.abs(aDistance - bDistance) > 4
+                    ) {
+                        return aDistance - bDistance;
+                    }
 
                     return a.area - b.area;
                 });
@@ -2584,14 +3014,24 @@ final class BrowserModel: ObservableObject {
             );
 
             if (memberHeading) {
-                let memberRoot = memberHeading.el.parentElement;
+                let memberRoot =
+                    memberHeading.el.parentElement;
 
-                for (let i = 0; memberRoot && i < 4; i++) {
+                for (
+                    let depth = 0;
+                    memberRoot && depth < 4;
+                    depth++
+                ) {
                     const names = Array.from(
                         memberRoot.querySelectorAll('a,span')
                     )
                     .filter(el => visible(entry, el))
-                    .map(el => clean(el.innerText || el.textContent))
+                    .map(el =>
+                        clean(
+                            el.innerText ||
+                            el.textContent
+                        )
+                    )
                     .filter(text =>
                         text &&
                         text.length <= 40 &&
@@ -2601,18 +3041,24 @@ final class BrowserModel: ObservableObject {
                     );
 
                     if (names.length) {
-                        members = Array.from(new Set(names));
+                        members =
+                            Array.from(new Set(names));
                         break;
                     }
 
-                    memberRoot = memberRoot.parentElement;
+                    memberRoot =
+                        memberRoot.parentElement;
                 }
             }
 
+            // Only the top-right "変更する" beside コピーする/削除する
+            // counts as full task editing.
             const editCandidates = Array.from(
-                root.querySelectorAll('a,button,[onclick]')
+                d.querySelectorAll(
+                    'a,button,[onclick]'
+                )
             )
-            .filter(el => visible(entry, el))
+            .filter(inDetailPane)
             .filter(el =>
                 clean(
                     el.innerText ||
@@ -2646,7 +3092,12 @@ final class BrowserModel: ObservableObject {
                 content,
                 members,
                 attachmentInfo,
-                canEditContent: editCandidates.length > 0
+                canEditContent: editCandidates.length > 0,
+                debug:
+                    `titleX:${Math.round(titleLeft)} ` +
+                    `nodes:${nodes.length} ` +
+                    `selects:${selects.length} ` +
+                    `content:${content.length}`
             };
         })();
         """
@@ -2667,8 +3118,12 @@ final class BrowserModel: ObservableObject {
                     let object = result as? [String: Any],
                     (object["status"] as? String) == "ok"
                 else {
+                    let status =
+                        (result as? [String: Any])?["status"]
+                        as? String ?? "unknown"
+
                     self.taskDetailMessage =
-                        "尚未讀到正確的 Brabio 任務詳細區"
+                        "尚未讀到正確的 Brabio 任務詳細區（\(status)）"
                     return
                 }
 
@@ -2680,23 +3135,50 @@ final class BrowserModel: ObservableObject {
                     object["members"] as? [String] ?? []
 
                 self.activeTaskDetail = TaskDetail(
-                    title: object["title"] as? String ?? task.name,
-                    period: object["period"] as? String ?? "",
+                    title:
+                        object["title"] as? String
+                        ?? task.name,
+                    period:
+                        object["period"] as? String
+                        ?? "",
                     progress:
                         (object["progress"] as? NSNumber)?.intValue
                         ?? task.progress,
-                    progressOptions: options,
-                    status: object["taskStatus"] as? String ?? "",
-                    lastUpdated: object["lastUpdated"] as? String ?? "",
-                    registeredBy: object["registeredBy"] as? String ?? "",
-                    updatedBy: object["updatedBy"] as? String ?? "",
-                    content: object["content"] as? String ?? "",
-                    members: members,
+                    progressOptions:
+                        options,
+                    status:
+                        object["taskStatus"] as? String
+                        ?? "",
+                    lastUpdated:
+                        object["lastUpdated"] as? String
+                        ?? "",
+                    registeredBy:
+                        object["registeredBy"] as? String
+                        ?? "",
+                    updatedBy:
+                        object["updatedBy"] as? String
+                        ?? "",
+                    content:
+                        object["content"] as? String
+                        ?? "",
+                    members:
+                        members,
                     attachmentInfo:
-                        object["attachmentInfo"] as? String ?? "",
+                        object["attachmentInfo"] as? String
+                        ?? "",
                     canEditContent:
-                        object["canEditContent"] as? Bool ?? false
+                        object["canEditContent"] as? Bool
+                        ?? false
                 )
+
+                if let debug =
+                    object["debug"] as? String {
+                    self.taskDetailMessage =
+                        "已讀取 Brabio 任務資料（\(debug)）"
+                } else {
+                    self.taskDetailMessage =
+                        "已讀取 Brabio 任務資料"
+                }
             }
         }
     }
