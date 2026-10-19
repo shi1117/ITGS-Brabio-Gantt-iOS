@@ -5,9 +5,16 @@ import WebKit
 struct WebView: UIViewRepresentable {
     @ObservedObject var model: BrowserModel
     let url: URL
+    let desktopViewport: Bool
+
+    init(model: BrowserModel, url: URL, desktopViewport: Bool = true) {
+        self.model = model
+        self.url = url
+        self.desktopViewport = desktopViewport
+    }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(model: model, startURL: url)
+        Coordinator(model: model)
     }
 
     func makeUIView(context: Context) -> WKWebView {
@@ -15,87 +22,66 @@ struct WebView: UIViewRepresentable {
         config.websiteDataStore = .default()
         config.defaultWebpagePreferences.allowsContentJavaScript = true
         config.preferences.javaScriptCanOpenWindowsAutomatically = true
-        config.allowsInlineMediaPlayback = true
+
+        if desktopViewport {
+            config.defaultWebpagePreferences.preferredContentMode = .desktop
+        }
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
-
         webView.allowsBackForwardNavigationGestures = false
         webView.allowsLinkPreview = false
         webView.scrollView.keyboardDismissMode = .interactive
         webView.scrollView.contentInsetAdjustmentBehavior = .never
-        webView.scrollView.bounces = false
-        webView.scrollView.alwaysBounceVertical = false
-        webView.scrollView.alwaysBounceHorizontal = false
-        webView.backgroundColor = .white
-        webView.scrollView.backgroundColor = .white
 
-        model.webView = webView
-        context.coordinator.observe(webView)
+        model.attach(webView, startURL: url)
 
-        webView.load(URLRequest(url: url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 60))
+        webView.load(
+            URLRequest(
+                url: url,
+                cachePolicy: .useProtocolCachePolicy,
+                timeoutInterval: 60
+            )
+        )
+
         return webView
     }
 
     func updateUIView(_ webView: WKWebView, context: Context) {
         model.webView = webView
-        context.coordinator.startURL = url
-    }
-
-    static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
-        coordinator.stopObserving()
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         private let model: BrowserModel
-        var startURL: URL
-        private var observations: [NSKeyValueObservation] = []
 
-        init(model: BrowserModel, startURL: URL) {
+        init(model: BrowserModel) {
             self.model = model
-            self.startURL = startURL
-        }
-
-        func observe(_ webView: WKWebView) {
-            observations = [
-                webView.observe(\.estimatedProgress, options: [.new]) { [weak self] webView, _ in
-                    Task { @MainActor in self?.model.progress = webView.estimatedProgress }
-                },
-                webView.observe(\.canGoBack, options: [.new]) { [weak self] webView, _ in
-                    Task { @MainActor in self?.model.canGoBack = webView.canGoBack }
-                },
-                webView.observe(\.canGoForward, options: [.new]) { [weak self] webView, _ in
-                    Task { @MainActor in self?.model.canGoForward = webView.canGoForward }
-                },
-                webView.observe(\.isLoading, options: [.new]) { [weak self] webView, _ in
-                    Task { @MainActor in self?.model.isLoading = webView.isLoading }
-                },
-                webView.observe(\.url, options: [.new]) { [weak self] webView, _ in
-                    Task { @MainActor in self?.model.currentURL = webView.url }
-                }
-            ]
-        }
-
-        func stopObserving() {
-            observations.removeAll()
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             Task { @MainActor in
                 model.errorMessage = nil
-                model.handlePageFinished(startURL: startURL)
+                model.handlePageFinished(currentURL: webView.url)
             }
         }
 
-        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        func webView(
+            _ webView: WKWebView,
+            didFail navigation: WKNavigation!,
+            withError error: Error
+        ) {
             Task { @MainActor in
                 model.errorMessage = error.localizedDescription
                 model.authCheckComplete = true
             }
         }
 
-        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        func webView(
+            _ webView: WKWebView,
+            didFailProvisionalNavigation navigation: WKNavigation!,
+            withError error: Error
+        ) {
             Task { @MainActor in
                 model.errorMessage = error.localizedDescription
                 model.authCheckComplete = true
@@ -125,7 +111,9 @@ struct WebView: UIViewRepresentable {
                 return
             }
 
-            if ["http", "https", "about"].contains(url.scheme?.lowercased() ?? "") {
+            let scheme = url.scheme?.lowercased() ?? ""
+
+            if ["http", "https", "about"].contains(scheme) {
                 decisionHandler(.allow)
             } else {
                 UIApplication.shared.open(url)

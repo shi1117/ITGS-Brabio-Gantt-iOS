@@ -17,9 +17,11 @@ targets:
     deploymentTarget: "16.0"
     sources:
       - path: AppConfig.swift
+      - path: Models.swift
       - path: BrowserModel.swift
-      - path: ContentView.swift
       - path: WebView.swift
+      - path: NativeViews.swift
+      - path: ContentView.swift
       - path: ITGSBrabioGanttApp.swift
     resources:
       - path: LaunchScreen.storyboard
