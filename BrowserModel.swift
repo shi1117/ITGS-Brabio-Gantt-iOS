@@ -580,9 +580,17 @@ final class BrowserModel: ObservableObject {
                 .map(e => e.doc.body ? (e.doc.body.innerText || '') : '')
                 .join('\\n');
 
-            // -------- 1. Find left-side task labels first --------
-            // Brabio's task names in the classic Gantt view are normally blue links.
-            let labels = [];
+            // -------- 1. Scope the task tree to the SELECTED project --------
+            // IMPORTANT:
+            // Never scan the whole Brabio page as one task list.
+            // Every project has its own expanded tree. We first locate the exact
+            // selected project row, then only keep the indented rows below it,
+            // stopping at the next project row at the same indentation level.
+            //
+            // This logic is generic. It works for 金日水塔專案, Side car-500kW事業,
+            // Control box projects, 2.5MW / 5MW, Row cooler, etc. No project is
+            // hard-coded here.
+            let projectMarker = null;
 
             for (const entry of entries) {
                 const docWidth =
@@ -590,43 +598,112 @@ final class BrowserModel: ObservableObject {
                     winFor(entry).innerWidth ||
                     980;
 
-                const anchors = Array.from(
-                    entry.doc.querySelectorAll('a')
+                const nodes = Array.from(
+                    entry.doc.querySelectorAll('a,span,td,div')
                 );
 
-                for (const el of anchors) {
+                for (const el of nodes) {
                     if (!visible(entry, el)) continue;
 
                     const r = rectFor(entry, el);
                     const name = cleanName(textOf(el));
 
-                    if (isBadTaskName(name)) continue;
-                    if (r.height < 9 || r.height > 60) continue;
+                    if (name !== selectedProjectName) continue;
 
-                    // Task tree is in the left portion of Brabio.
+                    // Project tree lives in the left side of Brabio.
                     if (r.left > entry.offsetX + Math.max(560, docWidth * 0.58)) {
                         continue;
                     }
 
-                    labels.push({
-                        entry,
-                        el,
-                        name,
-                        r,
-                        quality: 3
-                    });
+                    // Prefer the smallest element containing exactly the project name.
+                    if (
+                        projectMarker === null ||
+                        (r.width * r.height) <
+                        (projectMarker.r.width * projectMarker.r.height)
+                    ) {
+                        projectMarker = {
+                            entry,
+                            el,
+                            r,
+                            name
+                        };
+                    }
                 }
             }
 
-            // If Brabio renders task labels as spans rather than anchors,
-            // fall back to small visible text nodes in the left task pane.
-            if (labels.length < 5) {
-                for (const entry of entries) {
-                    const docWidth =
-                        entry.doc.documentElement.clientWidth ||
-                        winFor(entry).innerWidth ||
-                        980;
+            let labels = [];
 
+            if (projectMarker !== null) {
+                const entry = projectMarker.entry;
+                const projectX = projectMarker.r.left;
+                const projectY = projectMarker.r.cy;
+
+                const candidateAnchors = Array.from(
+                    entry.doc.querySelectorAll('a')
+                )
+                .filter(el => visible(entry, el))
+                .map(el => ({
+                    entry,
+                    el,
+                    name: cleanName(textOf(el)),
+                    r: rectFor(entry, el),
+                    quality: 3
+                }))
+                .filter(item =>
+                    item.r.cy > projectY + 3 &&
+                    item.r.left >= projectX + 12 &&
+                    item.r.left <= projectX + 500 &&
+                    item.r.height >= 9 &&
+                    item.r.height <= 60
+                )
+                .sort((a, b) => a.r.cy - b.r.cy);
+
+                // Find the next top-level project row.
+                let stopY = Number.POSITIVE_INFINITY;
+
+                for (const el of Array.from(
+                    entry.doc.querySelectorAll('a,span,td,div')
+                )) {
+                    if (!visible(entry, el)) continue;
+
+                    const r = rectFor(entry, el);
+                    const name = cleanName(textOf(el));
+
+                    if (r.cy <= projectY + 3) continue;
+
+                    const looksLikeProject =
+                        /(事業|專案|项目|プロジェクト|請假|休暇)$/i.test(name);
+
+                    const sameIndent =
+                        r.left <= projectX + 12;
+
+                    if (
+                        looksLikeProject &&
+                        sameIndent &&
+                        name !== selectedProjectName
+                    ) {
+                        stopY = Math.min(stopY, r.cy);
+                    }
+                }
+
+                for (const item of candidateAnchors) {
+                    if (item.r.cy >= stopY - 2) break;
+                    if (isBadTaskName(item.name)) continue;
+
+                    // Do not let another project heading become a child task.
+                    if (
+                        /(事業|專案|项目|プロジェクト|請假|休暇)$/i.test(item.name) &&
+                        item.r.left <= projectX + 24
+                    ) {
+                        continue;
+                    }
+
+                    labels.push(item);
+                }
+
+                // Some Brabio rows are clickable spans/divs rather than <a>.
+                // Use them only if the selected project's anchor list is too short.
+                if (labels.length < 2) {
                     const nodes = Array.from(
                         entry.doc.querySelectorAll('span,td,div')
                     );
@@ -637,13 +714,11 @@ final class BrowserModel: ObservableObject {
                         const r = rectFor(entry, el);
                         const name = cleanName(textOf(el));
 
-                        if (isBadTaskName(name)) continue;
+                        if (r.cy <= projectY + 3 || r.cy >= stopY - 2) continue;
+                        if (r.left < projectX + 12 || r.left > projectX + 500) continue;
                         if (r.height < 9 || r.height > 44) continue;
                         if (r.width < 18 || r.width > 480) continue;
-
-                        if (r.left > entry.offsetX + Math.max(560, docWidth * 0.58)) {
-                            continue;
-                        }
+                        if (isBadTaskName(name)) continue;
 
                         labels.push({
                             entry,
@@ -658,8 +733,14 @@ final class BrowserModel: ObservableObject {
 
             // Collapse nested duplicate DOM nodes on the same visual row.
             labels.sort((a, b) => {
-                if (Math.abs(a.r.cy - b.r.cy) > 2) return a.r.cy - b.r.cy;
-                if (a.quality !== b.quality) return b.quality - a.quality;
+                if (Math.abs(a.r.cy - b.r.cy) > 2) {
+                    return a.r.cy - b.r.cy;
+                }
+
+                if (a.quality !== b.quality) {
+                    return b.quality - a.quality;
+                }
+
                 return a.r.width - b.r.width;
             });
 
@@ -671,7 +752,9 @@ final class BrowserModel: ObservableObject {
                     Math.abs(existing.r.cy - item.r.cy) <= 6
                 );
 
-                if (!duplicate) cleanLabels.push(item);
+                if (!duplicate) {
+                    cleanLabels.push(item);
+                }
             }
 
             labels = cleanLabels;
@@ -1028,6 +1111,7 @@ final class BrowserModel: ObservableObject {
                 tasks: final.slice(0, 400),
                 debug:
                     `frames:${entries.length - 1} ` +
+                    `project:${projectMarker ? 'yes' : 'no'} ` +
                     `labels:${labels.length} ` +
                     `bars:${bars.length} ` +
                     `dates:${compactAnchors.length}`
