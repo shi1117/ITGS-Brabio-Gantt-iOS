@@ -1,0 +1,10 @@
+ITGS Brabio Gantt iOS v0.1
+
+1. 目前已完成 iOS 原始碼與 GitHub Actions。
+2. 沒有 Apple 簽章資料時，可先跑 build-simulator.yml 驗證程式可正常編譯。
+3. 真正可以安裝到 iPhone 的 .ipa 必須有 Apple 的簽章：
+   - Apple Developer Team ID
+   - Distribution/Development Certificate (.p12)
+   - Provisioning Profile (.mobileprovision)
+4. 將簽章資料加入 GitHub Secrets 後，手動執行 Build Signed iOS IPA workflow 即可產出 IPA Artifact。
+5. Bundle ID 預設為 com.itgs.brabiogantt。

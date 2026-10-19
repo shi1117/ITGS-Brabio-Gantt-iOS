@@ -1,3 +1,12 @@
+## v0.3 Fullscreen
+
+- 移除上方 `Brabio Gantt` 標題列
+- 移除下方大型瀏覽器工具列
+- WKWebView 改為全螢幕 edge-to-edge
+- 隱藏狀態列，甘特圖可使用整個畫面
+- 保留右上角小型 `…` 選單：上一頁 / 下一頁 / 重新整理 / 分享 / 設定
+- 保留左右滑返回、下拉重新整理
+
 # ITGS Brabio Gantt for iOS
 
 iPhone/iPad 包裝版 Brabio 甘特圖 App。

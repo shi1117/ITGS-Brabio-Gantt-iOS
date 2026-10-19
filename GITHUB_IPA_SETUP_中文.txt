@@ -1,0 +1,28 @@
+ITGS Brabio Gantt iOS v0.2 — GitHub Actions 產生可安裝 IPA
+
+Bundle ID：com.itgs.brabiogantt
+最低 iOS：16.0
+建置方式：Apple Development + Development Provisioning Profile
+
+你需要準備 4 個 GitHub Secrets：
+1. IOS_TEAM_ID
+   Apple Developer Team ID（10 碼英數字）
+
+2. IOS_CERT_P12_BASE64
+   Apple Development 憑證 + 私鑰匯出的 .p12 檔，轉成 Base64 後的完整文字
+
+3. IOS_CERT_PASSWORD
+   匯出 .p12 時設定的密碼
+
+4. IOS_PROVISION_PROFILE_BASE64
+   Bundle ID = com.itgs.brabiogantt 的 iOS App Development provisioning profile，轉成 Base64 後的完整文字
+
+重要：
+- 要直接安裝到指定 iPhone，該 iPhone 的 UDID 必須包含在 Development Provisioning Profile 裡。
+- 不要把 .p12、密碼、Provisioning Profile 提交到公開 GitHub Repo。
+- 只放在 GitHub Settings > Secrets and variables > Actions > Repository secrets。
+
+GitHub 建置：
+Actions > Build Signed iOS IPA > Run workflow
+成功後會有 Artifact：ITGS_Brabio_Gantt_iOS_v0.2
+下載後即為 .ipa。
