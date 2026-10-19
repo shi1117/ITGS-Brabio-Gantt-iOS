@@ -217,7 +217,12 @@ final class BrowserModel: ObservableObject {
         extractProjects { [weak self] in
             Task { @MainActor in
                 guard let self else { return }
-                self.extractTasks(attempt: 0)
+
+                if let project = self.selectedProject {
+                    self.prepareSelectedProject(project, attempt: 0)
+                } else {
+                    self.extractTasks(attempt: 0)
+                }
             }
         }
     }
@@ -235,60 +240,254 @@ final class BrowserModel: ObservableObject {
             return
         }
 
+        prepareSelectedProject(project, attempt: 0)
+    }
+
+    private func prepareSelectedProject(_ project: ProjectItem, attempt: Int) {
         guard let webView else {
             syncState = .failed("找不到 Brabio 頁面")
             return
         }
 
         let nameLiteral = jsonLiteral(project.name)
+        let attemptValue = attempt
 
         let js = """
         (function() {
-            function docs(root) {
-                const out = [root];
-                const frames = Array.from(root.querySelectorAll('iframe,frame'));
-                for (const frame of frames) {
+            const targetName = \(nameLiteral);
+            const attempt = \(attemptValue);
+
+            function collectDocs(root, offsetX = 0, offsetY = 0) {
+                const out = [{ doc: root, offsetX, offsetY }];
+
+                for (const frame of Array.from(root.querySelectorAll('iframe,frame'))) {
                     try {
-                        if (frame.contentDocument) out.push(...docs(frame.contentDocument));
+                        if (!frame.contentDocument) continue;
+
+                        const r = frame.getBoundingClientRect();
+
+                        out.push(
+                            ...collectDocs(
+                                frame.contentDocument,
+                                offsetX + r.left,
+                                offsetY + r.top
+                            )
+                        );
                     } catch (_) {}
                 }
+
                 return out;
             }
 
-            const targetName = \(nameLiteral);
+            function rect(entry, el) {
+                const r = el.getBoundingClientRect();
 
-            for (const d of docs(document)) {
-                const w = d.defaultView || window;
+                return {
+                    left: r.left + entry.offsetX,
+                    right: r.right + entry.offsetX,
+                    top: r.top + entry.offsetY,
+                    bottom: r.bottom + entry.offsetY,
+                    width: r.width,
+                    height: r.height,
+                    cx: r.left + entry.offsetX + r.width / 2,
+                    cy: r.top + entry.offsetY + r.height / 2
+                };
+            }
 
-                const nodes = Array.from(
-                    d.querySelectorAll('a,button,[onclick],td,span,div')
-                ).filter(el => {
-                    const r = el.getBoundingClientRect();
-                    const s = w.getComputedStyle(el);
-                    return r.width > 0 &&
-                           r.height > 0 &&
-                           s.display !== 'none' &&
-                           s.visibility !== 'hidden';
-                });
+            function visible(entry, el) {
+                if (!el) return false;
 
-                const exact = nodes.find(
-                    el => (el.innerText || el.textContent || '').trim() === targetName
-                );
+                const w = entry.doc.defaultView || window;
+                const s = w.getComputedStyle(el);
+                const r = el.getBoundingClientRect();
 
-                const fuzzy = nodes.find(
-                    el => (el.innerText || el.textContent || '').trim().indexOf(targetName) >= 0
-                );
+                return r.width > 0 &&
+                       r.height > 0 &&
+                       s.display !== 'none' &&
+                       s.visibility !== 'hidden';
+            }
 
-                const hit = exact || fuzzy;
+            function text(el) {
+                return (el.innerText || el.textContent || '')
+                    .replace(/\\s+/g, ' ')
+                    .trim();
+            }
 
-                if (hit) {
-                    const clickable = hit.closest('a,button,[onclick]') || hit;
-                    clickable.click();
-                    return 'clicked';
+            const entries = collectDocs(document);
+            let marker = null;
+
+            // Choose the LEFTMOST exact project-name match.
+            for (const entry of entries) {
+                for (const el of Array.from(
+                    entry.doc.querySelectorAll('a,span,td,div')
+                )) {
+                    if (!visible(entry, el)) continue;
+                    if (text(el) !== targetName) continue;
+
+                    const r = rect(entry, el);
+                    const area = r.width * r.height;
+
+                    if (
+                        marker === null ||
+                        r.left < marker.r.left - 8 ||
+                        (
+                            Math.abs(r.left - marker.r.left) <= 8 &&
+                            area < marker.area
+                        )
+                    ) {
+                        marker = { entry, el, r, area };
+                    }
                 }
             }
 
-            return 'not-found';
+            if (!marker) {
+                return {
+                    status: 'project-not-found',
+                    expanded: false,
+                    children: 0
+                };
+            }
+
+            const entry = marker.entry;
+            const projectX = marker.r.left;
+            const projectY = marker.r.cy;
+
+            // Find the next sibling project row.
+            let stopY = Number.POSITIVE_INFINITY;
+
+            for (const el of Array.from(
+                entry.doc.querySelectorAll('a,span,td,div')
+            )) {
+                if (!visible(entry, el)) continue;
+
+                const r = rect(entry, el);
+                const name = text(el);
+
+                if (r.cy <= projectY + 3) continue;
+                if (r.left > projectX + 30) continue;
+
+                if (
+                    /(事業|專案|项目|プロジェクト|請假|休暇)$/i.test(name) &&
+                    name !== targetName
+                ) {
+                    stopY = Math.min(stopY, r.cy);
+                }
+            }
+
+            function countVisibleChildren() {
+                let count = 0;
+
+                for (const el of Array.from(
+                    entry.doc.querySelectorAll('a,span,td,div')
+                )) {
+                    if (!visible(entry, el)) continue;
+
+                    const r = rect(entry, el);
+                    const t = text(el);
+
+                    if (r.cy <= projectY + 4 || r.cy >= stopY - 2) continue;
+                    if (r.left < projectX + 10 || r.left > projectX + 430) continue;
+                    if (r.height < 8 || r.height > 50) continue;
+                    if (!t || t.length < 2 || t.length > 100) continue;
+
+                    if (
+                        /^\\d+\\s*営業日$/i.test(t) ||
+                        /^\\d{1,3}\\s*%$/i.test(t) ||
+                        /^\\d{1,2}\\/\\d{1,2}/.test(t)
+                    ) {
+                        continue;
+                    }
+
+                    count += 1;
+                }
+
+                return count;
+            }
+
+            let childrenBefore = countVisibleChildren();
+            let expanded = childrenBefore > 0;
+
+            // If collapsed, find the small [+] / expand control immediately to
+            // the LEFT of the project name and click it.
+            if (!expanded) {
+                const possible = [];
+
+                for (const el of Array.from(
+                    entry.doc.querySelectorAll('img,a,button,input,span,div')
+                )) {
+                    if (!visible(entry, el)) continue;
+
+                    const r = rect(entry, el);
+
+                    if (Math.abs(r.cy - projectY) > 16) continue;
+                    if (r.right > projectX + 8) continue;
+                    if (r.left < projectX - 100) continue;
+                    if (r.width < 6 || r.width > 40) continue;
+                    if (r.height < 6 || r.height > 40) continue;
+
+                    const blob = [
+                        text(el),
+                        el.id || '',
+                        typeof el.className === 'string' ? el.className : '',
+                        el.getAttribute('title') || '',
+                        el.getAttribute('alt') || '',
+                        el.getAttribute('src') || '',
+                        el.getAttribute('name') || ''
+                    ].join(' ').toLowerCase();
+
+                    let score = 0;
+
+                    if (/(plus|expand|open|closed|tree.*plus|\\+)/i.test(blob)) {
+                        score += 100;
+                    }
+
+                    if (/(minus|collapse|opened|tree.*minus)/i.test(blob)) {
+                        score -= 100;
+                    }
+
+                    if (el.tagName === 'IMG') score += 20;
+                    if (el.closest('a,button,[onclick]')) score += 15;
+
+                    // The closest small control to the project name is likely the +/-.
+                    score -= Math.abs(projectX - r.right) * 0.2;
+
+                    possible.push({ el, r, score, blob });
+                }
+
+                possible.sort((a, b) => b.score - a.score);
+
+                const expander = possible.find(x => x.score > 5);
+
+                if (expander) {
+                    const clickable =
+                        expander.el.closest('a,button,[onclick]') ||
+                        expander.el;
+
+                    clickable.click();
+                    expanded = true;
+                }
+            }
+
+            // On the first attempt also activate/select the project row itself.
+            // This handles Brabio projects where the folder expansion and the
+            // project selection are two separate actions.
+            if (attempt === 0) {
+                const directLink =
+                    marker.el.closest('a,button,[onclick]') ||
+                    marker.el.querySelector?.('a,button,[onclick]');
+
+                if (directLink) {
+                    try {
+                        directLink.click();
+                    } catch (_) {}
+                }
+            }
+
+            return {
+                status: expanded ? 'expanded-or-selected' : 'selected',
+                expanded,
+                children: countVisibleChildren()
+            };
         })();
         """
 
@@ -296,12 +495,23 @@ final class BrowserModel: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
 
-                if (result as? String) != "clicked" {
-                    self.syncState = .failed("找不到「\(project.name)」的 Brabio 連結")
+                let object = result as? [String: Any]
+                let status = object?["status"] as? String ?? "unknown"
+                let children = (object?["children"] as? NSNumber)?.intValue ?? 0
+
+                if status == "project-not-found" {
+                    self.syncState = .failed("找不到「\(project.name)」的 Brabio 專案列")
                     return
                 }
 
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                // Brabio expands the tree / loads its task rows asynchronously.
+                try? await Task.sleep(nanoseconds: 850_000_000)
+
+                if children == 0 && attempt < 3 {
+                    self.prepareSelectedProject(project, attempt: attempt + 1)
+                    return
+                }
+
                 self.extractTasks(attempt: 0)
             }
         }
