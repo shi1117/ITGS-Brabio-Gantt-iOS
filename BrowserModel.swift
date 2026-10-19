@@ -427,39 +427,73 @@ final class BrowserModel: ObservableObject {
             return
         }
 
+        let projectNameJSON = jsonLiteral(selectedProject?.name ?? "")
+
         let js = """
         (function() {
-            function collectDocs(root, depth = 0) {
-                const result = [{ doc: root, depth }];
+            const selectedProjectName = \(projectNameJSON);
+
+            // Convert coordinates from nested frames into one common coordinate system.
+            function collectDocs(root, offsetX = 0, offsetY = 0, depth = 0) {
+                const result = [{
+                    doc: root,
+                    offsetX,
+                    offsetY,
+                    depth
+                }];
 
                 for (const frame of Array.from(root.querySelectorAll('iframe,frame'))) {
                     try {
-                        if (frame.contentDocument) {
-                            result.push(...collectDocs(frame.contentDocument, depth + 1));
-                        }
+                        if (!frame.contentDocument) continue;
+
+                        const r = frame.getBoundingClientRect();
+
+                        result.push(
+                            ...collectDocs(
+                                frame.contentDocument,
+                                offsetX + r.left,
+                                offsetY + r.top,
+                                depth + 1
+                            )
+                        );
                     } catch (_) {}
                 }
 
                 return result;
             }
 
-            const docEntries = collectDocs(document);
+            const entries = collectDocs(document);
 
-            function winFor(d) {
-                return d.defaultView || window;
+            function winFor(entry) {
+                return entry.doc.defaultView || window;
             }
 
-            function visible(d, el) {
+            function rectFor(entry, el) {
+                const r = el.getBoundingClientRect();
+
+                return {
+                    left: r.left + entry.offsetX,
+                    right: r.right + entry.offsetX,
+                    top: r.top + entry.offsetY,
+                    bottom: r.bottom + entry.offsetY,
+                    width: r.width,
+                    height: r.height,
+                    cx: r.left + entry.offsetX + r.width / 2,
+                    cy: r.top + entry.offsetY + r.height / 2
+                };
+            }
+
+            function visible(entry, el) {
                 if (!el) return false;
 
-                const w = winFor(d);
-                const s = w.getComputedStyle(el);
+                const s = winFor(entry).getComputedStyle(el);
                 const r = el.getBoundingClientRect();
 
                 return r.width > 0 &&
                        r.height > 0 &&
                        s.display !== 'none' &&
-                       s.visibility !== 'hidden';
+                       s.visibility !== 'hidden' &&
+                       Number(s.opacity || 1) > 0.01;
             }
 
             function textOf(el) {
@@ -468,471 +502,535 @@ final class BrowserModel: ObservableObject {
                     .trim();
             }
 
-            function parseDateParts(str) {
-                const m = str.match(
-                    /(20\\d{2})[\\/年\\.\\-](\\d{1,2})[\\/月\\.\\-](\\d{1,2})/
-                );
-
-                if (!m) return null;
-
-                return {
-                    y: Number(m[1]),
-                    m: Number(m[2]),
-                    d: Number(m[3])
-                };
-            }
-
-            function iso(d) {
-                const y = d.getFullYear();
-                const m = String(d.getMonth() + 1).padStart(2, '0');
-                const day = String(d.getDate()).padStart(2, '0');
-                return `${y}-${m}-${day}`;
-            }
-
-            function brightness(color) {
-                const m = String(color || '')
-                    .match(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)/);
-
-                if (!m) return 255;
-
-                return (
-                    Number(m[1]) +
-                    Number(m[2]) +
-                    Number(m[3])
-                ) / 3;
-            }
-
-            function cleanTaskName(value) {
+            function cleanName(value) {
                 return String(value || '')
-                    .replace(/^[-+▶▼■□●○▸▾\\s]+/, '')
+                    .replace(/^[-+▶▼■□●○▸▾●◉✓✔→↪📁📂\\s]+/, '')
                     .replace(/\\s+/g, ' ')
                     .trim();
             }
 
-            const bodies = docEntries
-                .map(x => x.doc.body ? (x.doc.body.innerText || '') : '')
+            function isBadTaskName(value) {
+                const name = cleanName(value);
+
+                if (name.length < 2 || name.length > 90) return true;
+                if (name === selectedProjectName) return true;
+                if (/^(トップページ|チャート|カレンダー|担当状況|全画面|表示設定|Brabio|ログアウト|ヘルプ)$/i.test(name)) return true;
+                if (/^(全員|全ての進捗|タスクを追加する)$/i.test(name)) return true;
+                if (/ログインユーザー|メンバー未設定/.test(name)) return true;
+                if (/^[0-9]+$/.test(name)) return true;
+                if (/^[0-9]{1,2}月[0-9]{1,2}日/.test(name)) return true;
+                if (/^20[0-9]{2}[\\/年.-]/.test(name)) return true;
+                if (/^[0-9]{1,3}%$/.test(name)) return true;
+                if (/@/.test(name)) return true;
+
+                return false;
+            }
+
+            function rgb(color) {
+                const m = String(color || '')
+                    .match(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)/);
+
+                if (!m) return null;
+
+                return {
+                    r: Number(m[1]),
+                    g: Number(m[2]),
+                    b: Number(m[3])
+                };
+            }
+
+            function brightness(color) {
+                const c = rgb(color);
+                if (!c) return 255;
+                return (c.r + c.g + c.b) / 3;
+            }
+
+            function saturation(color) {
+                const c = rgb(color);
+                if (!c) return 0;
+
+                const maxV = Math.max(c.r, c.g, c.b);
+                const minV = Math.min(c.r, c.g, c.b);
+
+                return maxV - minV;
+            }
+
+            function iso(date) {
+                const y = date.getFullYear();
+                const m = String(date.getMonth() + 1).padStart(2, '0');
+                const d = String(date.getDate()).padStart(2, '0');
+                return `${y}-${m}-${d}`;
+            }
+
+            function parseDate(value) {
+                const m = String(value || '').match(
+                    /(20\\d{2})[\\/年.\\-](\\d{1,2})[\\/月.\\-](\\d{1,2})/
+                );
+
+                if (!m) return null;
+
+                return new Date(
+                    Number(m[1]),
+                    Number(m[2]) - 1,
+                    Number(m[3])
+                );
+            }
+
+            const allText = entries
+                .map(e => e.doc.body ? (e.doc.body.innerText || '') : '')
                 .join('\\n');
 
-            let overallStart = null;
-            let overallEnd = null;
+            // -------- 1. Find left-side task labels first --------
+            // Brabio's task names in the classic Gantt view are normally blue links.
+            let labels = [];
 
-            const ranges = Array.from(
-                bodies.matchAll(
-                    /(20\\d{2})[\\/年\\.\\-](\\d{1,2})[\\/月\\.\\-](\\d{1,2})\\s*[～~〜―—\\-]\\s*(20\\d{2})[\\/年\\.\\-](\\d{1,2})[\\/月\\.\\-](\\d{1,2})/g
-                )
-            );
+            for (const entry of entries) {
+                const docWidth =
+                    entry.doc.documentElement.clientWidth ||
+                    winFor(entry).innerWidth ||
+                    980;
 
-            if (ranges.length) {
-                const r = ranges[ranges.length - 1];
-
-                overallStart = new Date(
-                    Number(r[1]),
-                    Number(r[2]) - 1,
-                    Number(r[3])
+                const anchors = Array.from(
+                    entry.doc.querySelectorAll('a')
                 );
 
-                overallEnd = new Date(
-                    Number(r[4]),
-                    Number(r[5]) - 1,
-                    Number(r[6])
-                );
-            }
+                for (const el of anchors) {
+                    if (!visible(entry, el)) continue;
 
-            if (!overallStart || !overallEnd || overallEnd <= overallStart) {
-                const month = bodies.match(/(20\\d{2})年(\\d{1,2})月/);
+                    const r = rectFor(entry, el);
+                    const name = cleanName(textOf(el));
 
-                if (month) {
-                    overallStart = new Date(
-                        Number(month[1]),
-                        Number(month[2]) - 1,
-                        1
-                    );
+                    if (isBadTaskName(name)) continue;
+                    if (r.height < 9 || r.height > 60) continue;
 
-                    overallEnd = new Date(
-                        Number(month[1]),
-                        Number(month[2]) + 2,
-                        0
-                    );
-                } else {
-                    const now = new Date();
-                    overallStart = new Date(now.getFullYear(), now.getMonth(), 1);
-                    overallEnd = new Date(now.getFullYear(), now.getMonth() + 3, 0);
-                }
-            }
+                    // Task tree is in the left portion of Brabio.
+                    if (r.left > entry.offsetX + Math.max(560, docWidth * 0.58)) {
+                        continue;
+                    }
 
-            const results = [];
-            const debug = {
-                docs: docEntries.length,
-                rows: 0,
-                bars: 0,
-                attributeHits: 0,
-                textCandidates: 0
-            };
-
-            // PASS 1:
-            // Read any element/row whose text, title, data attributes or onclick
-            // already contain dates. Brabio often stores more information in
-            // attributes than it visually prints.
-            for (const entry of docEntries) {
-                const d = entry.doc;
-
-                const nodes = Array.from(
-                    d.querySelectorAll(
-                        'tr,[role="row"],li,a,td,div,span'
-                    )
-                );
-
-                debug.rows += nodes.length;
-
-                for (const el of nodes) {
-                    if (!visible(d, el)) continue;
-
-                    const attrs = Array.from(el.attributes || [])
-                        .map(a => `${a.name}=${a.value}`)
-                        .join(' ');
-
-                    const blob = `${textOf(el)} ${attrs}`;
-                    const dates = Array.from(
-                        blob.matchAll(
-                            /20\\d{2}[\\/年\\.\\-]\\d{1,2}[\\/月\\.\\-]\\d{1,2}/g
-                        )
-                    );
-
-                    if (dates.length === 0) continue;
-
-                    let name = '';
-
-                    const cells = Array.from(el.querySelectorAll('td,th,a,span'))
-                        .map(textOf)
-                        .filter(x => x.length >= 2 && x.length <= 90);
-
-                    name =
-                        cells.find(x =>
-                            !/^\\d+$/.test(x) &&
-                            !/20\\d{2}/.test(x) &&
-                            !/^\\d{1,3}%$/.test(x) &&
-                            !/^(日|週|月|年|前月|次月)$/.test(x)
-                        ) || cleanTaskName(textOf(el));
-
-                    name = cleanTaskName(name);
-
-                    if (name.length < 2 || name.length > 100) continue;
-
-                    const first = parseDateParts(dates[0][0]);
-                    const second = parseDateParts(
-                        (dates[1] ? dates[1][0] : dates[0][0])
-                    );
-
-                    if (!first || !second) continue;
-
-                    const progressMatch = blob.match(/(\\d{1,3})\\s*%/);
-                    const emailMatch = blob.match(
-                        /[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/i
-                    );
-
-                    results.push({
+                    labels.push({
+                        entry,
+                        el,
                         name,
-                        start: iso(new Date(first.y, first.m - 1, first.d)),
-                        end: iso(new Date(second.y, second.m - 1, second.d)),
-                        progress: progressMatch
-                            ? Math.max(0, Math.min(100, Number(progressMatch[1])))
-                            : 0,
-                        assignee: emailMatch ? emailMatch[0] : '未指定'
+                        r,
+                        quality: 3
                     });
-
-                    debug.attributeHits += 1;
                 }
             }
 
-            // PASS 2:
-            // Geometry-based extraction. This handles the classic Brabio chart
-            // where the task bar is painted as an element with width/position.
-            if (results.length < 2) {
-                for (const entry of docEntries) {
-                    const d = entry.doc;
-                    const w = winFor(d);
-
-                    const all = Array.from(d.querySelectorAll('*'))
-                        .filter(el => visible(d, el));
-
-                    const scrollContainers = all
-                        .filter(el => {
-                            const r = el.getBoundingClientRect();
-
-                            return el.scrollWidth > el.clientWidth + 150 &&
-                                   r.width > 200 &&
-                                   r.height > 100;
-                        })
-                        .sort((a, b) => b.scrollWidth - a.scrollWidth);
-
-                    const timeline =
-                        scrollContainers[0] ||
-                        d.scrollingElement ||
-                        d.documentElement;
-
-                    const timelineRect = timeline.getBoundingClientRect
-                        ? timeline.getBoundingClientRect()
-                        : { left: 0, top: 0 };
-
-                    const scrollLeft = timeline.scrollLeft || 0;
-                    const totalWidth = Math.max(
-                        timeline.scrollWidth || timeline.clientWidth || 1,
-                        1
-                    );
-
-                    const viewportWidth =
-                        d.documentElement.clientWidth ||
-                        w.innerWidth ||
+            // If Brabio renders task labels as spans rather than anchors,
+            // fall back to small visible text nodes in the left task pane.
+            if (labels.length < 5) {
+                for (const entry of entries) {
+                    const docWidth =
+                        entry.doc.documentElement.clientWidth ||
+                        winFor(entry).innerWidth ||
                         980;
 
-                    const textCandidates = Array.from(
-                        d.querySelectorAll('a,span,td,div,input')
-                    )
-                    .filter(el => visible(d, el))
-                    .map(el => {
-                        const r = el.getBoundingClientRect();
-
-                        let t = textOf(el);
-
-                        if (!t && el.value) {
-                            t = String(el.value).trim();
-                        }
-
-                        return {
-                            el,
-                            text: cleanTaskName(t),
-                            cy: r.top + r.height / 2,
-                            x: r.left,
-                            w: r.width,
-                            h: r.height
-                        };
-                    })
-                    .filter(x =>
-                        x.x < Math.max(520, viewportWidth * 0.55) &&
-                        x.cy > 80 &&
-                        x.text.length >= 2 &&
-                        x.text.length <= 90 &&
-                        !/^\\d+$/.test(x.text) &&
-                        !/(トップページ|チャート|カレンダー|担当状況|全画面|表示設定)/.test(x.text) &&
-                        !/^(日|週|月|年|前月|次月)$/.test(x.text)
+                    const nodes = Array.from(
+                        entry.doc.querySelectorAll('span,td,div')
                     );
 
-                    debug.textCandidates += textCandidates.length;
+                    for (const el of nodes) {
+                        if (!visible(entry, el)) continue;
 
-                    const bars = all
-                        .map(el => {
-                            const r = el.getBoundingClientRect();
-                            const s = w.getComputedStyle(el);
-                            const marker = [
-                                el.id,
-                                el.className,
-                                el.getAttribute('name'),
-                                el.getAttribute('title')
-                            ].join(' ').toLowerCase();
+                        const r = rectFor(entry, el);
+                        const name = cleanName(textOf(el));
 
-                            const hasPaint =
-                                (
-                                    s.backgroundColor &&
-                                    s.backgroundColor !== 'rgba(0, 0, 0, 0)' &&
-                                    s.backgroundColor !== 'transparent' &&
-                                    brightness(s.backgroundColor) < 238
-                                ) ||
-                                (
-                                    s.backgroundImage &&
-                                    s.backgroundImage !== 'none'
-                                ) ||
-                                /gantt|chart|task|bar|schedule|progress/.test(marker);
+                        if (isBadTaskName(name)) continue;
+                        if (r.height < 9 || r.height > 44) continue;
+                        if (r.width < 18 || r.width > 480) continue;
 
-                            return {
-                                el,
-                                r,
-                                marker,
-                                hasPaint
-                            };
-                        })
-                        .filter(x =>
-                            x.r.width >= 18 &&
-                            x.r.height >= 5 &&
-                            x.r.height <= 38 &&
-                            x.r.top > 80 &&
-                            x.hasPaint
-                        );
-
-                    debug.bars += bars.length;
-
-                    const totalMS =
-                        overallEnd.getTime() - overallStart.getTime();
-
-                    const seenRows = new Set();
-
-                    for (const bar of bars) {
-                        const cy = bar.r.top + bar.r.height / 2;
-
-                        let nearest = null;
-                        let nearestDelta = 99999;
-
-                        for (const candidate of textCandidates) {
-                            const delta = Math.abs(candidate.cy - cy);
-
-                            if (delta < nearestDelta && delta <= 24) {
-                                nearest = candidate;
-                                nearestDelta = delta;
-                            }
+                        if (r.left > entry.offsetX + Math.max(560, docWidth * 0.58)) {
+                            continue;
                         }
 
-                        if (!nearest) continue;
-
-                        let name = cleanTaskName(nearest.text);
-
-                        if (name.length < 2) continue;
-                        if (/^(タスクを追加する|全員|全ての進捗)$/.test(name)) continue;
-                        if (/(事業|專案|项目|プロジェクト)$/.test(name) && name.length < 50) continue;
-
-                        const rowKey = `${Math.round(cy / 4)}:${name}`;
-
-                        if (seenRows.has(rowKey)) continue;
-                        seenRows.add(rowKey);
-
-                        const localX = Math.max(
-                            0,
-                            bar.r.left - timelineRect.left + scrollLeft
-                        );
-
-                        const startRatio = Math.max(
-                            0,
-                            Math.min(1, localX / totalWidth)
-                        );
-
-                        const endRatio = Math.max(
-                            startRatio,
-                            Math.min(
-                                1,
-                                (localX + bar.r.width) / totalWidth
-                            )
-                        );
-
-                        const startDate = new Date(
-                            overallStart.getTime() + totalMS * startRatio
-                        );
-
-                        const endDate = new Date(
-                            overallStart.getTime() + totalMS * endRatio
-                        );
-
-                        const container =
-                            bar.el.closest('tr,[role="row"]') ||
-                            bar.el.parentElement;
-
-                        const rowText = container
-                            ? `${textOf(container)} ${Array.from(container.attributes || []).map(a => a.value).join(' ')}`
-                            : '';
-
-                        const progressMatch =
-                            rowText.match(/(\\d{1,3})\\s*%/);
-
-                        const emailMatch =
-                            rowText.match(
-                                /[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/i
-                            );
-
-                        results.push({
+                        labels.push({
+                            entry,
+                            el,
                             name,
-                            start: iso(startDate),
-                            end: iso(endDate < startDate ? startDate : endDate),
-                            progress: progressMatch
-                                ? Math.max(0, Math.min(100, Number(progressMatch[1])))
-                                : 0,
-                            assignee: emailMatch
-                                ? emailMatch[0]
-                                : '未指定'
+                            r,
+                            quality: 1
                         });
                     }
                 }
             }
 
-            // PASS 3:
-            // Last fallback: visible table rows with date-like text.
-            if (results.length === 0) {
-                for (const entry of docEntries) {
-                    const d = entry.doc;
+            // Collapse nested duplicate DOM nodes on the same visual row.
+            labels.sort((a, b) => {
+                if (Math.abs(a.r.cy - b.r.cy) > 2) return a.r.cy - b.r.cy;
+                if (a.quality !== b.quality) return b.quality - a.quality;
+                return a.r.width - b.r.width;
+            });
 
-                    for (const row of Array.from(d.querySelectorAll('tr'))) {
-                        if (!visible(d, row)) continue;
+            const cleanLabels = [];
 
-                        const t = textOf(row);
+            for (const item of labels) {
+                const duplicate = cleanLabels.some(existing =>
+                    existing.name === item.name &&
+                    Math.abs(existing.r.cy - item.r.cy) <= 6
+                );
 
-                        if (t.length < 3 || t.length > 260) continue;
+                if (!duplicate) cleanLabels.push(item);
+            }
 
-                        const dates = Array.from(
-                            t.matchAll(
-                                /20\\d{2}[\\/年\\.\\-]\\d{1,2}[\\/月\\.\\-]\\d{1,2}/g
-                            )
-                        );
+            labels = cleanLabels;
 
-                        if (!dates.length) continue;
+            // -------- 2. Find real Gantt bars --------
+            let bars = [];
 
-                        const first = parseDateParts(dates[0][0]);
-                        const second = parseDateParts(
-                            dates[1] ? dates[1][0] : dates[0][0]
-                        );
+            for (const entry of entries) {
+                const w = winFor(entry);
 
-                        if (!first || !second) continue;
+                for (const el of Array.from(entry.doc.querySelectorAll('*'))) {
+                    if (!visible(entry, el)) continue;
 
-                        const cells = Array.from(
-                            row.querySelectorAll('td,th')
-                        )
-                        .map(textOf)
-                        .filter(x => x.length >= 2 && x.length <= 90);
+                    const r = rectFor(entry, el);
 
-                        const name = cleanTaskName(
-                            cells.find(x =>
-                                !/^\\d+$/.test(x) &&
-                                !/20\\d{2}/.test(x) &&
-                                !/%/.test(x)
-                            ) || ''
-                        );
+                    if (r.width < 12) continue;
+                    if (r.height < 5 || r.height > 34) continue;
 
-                        if (!name) continue;
+                    const style = w.getComputedStyle(el);
+                    const marker = [
+                        el.id,
+                        typeof el.className === 'string' ? el.className : '',
+                        el.getAttribute('name') || '',
+                        el.getAttribute('title') || ''
+                    ].join(' ').toLowerCase();
 
-                        const progressMatch = t.match(/(\\d{1,3})\\s*%/);
-                        const emailMatch = t.match(
-                            /[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/i
-                        );
+                    const bg = style.backgroundColor || '';
+                    const bgImage = style.backgroundImage || '';
 
-                        results.push({
-                            name,
-                            start: iso(
-                                new Date(first.y, first.m - 1, first.d)
-                            ),
-                            end: iso(
-                                new Date(second.y, second.m - 1, second.d)
-                            ),
-                            progress: progressMatch
-                                ? Math.max(0, Math.min(100, Number(progressMatch[1])))
-                                : 0,
-                            assignee: emailMatch
-                                ? emailMatch[0]
-                                : '未指定'
-                        });
+                    const painted =
+                        (
+                            bg &&
+                            bg !== 'rgba(0, 0, 0, 0)' &&
+                            bg !== 'transparent' &&
+                            brightness(bg) < 247
+                        ) ||
+                        (
+                            bgImage &&
+                            bgImage !== 'none'
+                        ) ||
+                        /gantt|task|bar|schedule|progress/.test(marker);
+
+                    if (!painted) continue;
+
+                    // Ignore common borders/grid cells.
+                    if (
+                        saturation(bg) < 8 &&
+                        brightness(bg) > 225 &&
+                        !/gantt|task|bar|progress/.test(marker)
+                    ) {
+                        continue;
                     }
+
+                    bars.push({
+                        entry,
+                        el,
+                        r,
+                        bg,
+                        sat: saturation(bg),
+                        marker
+                    });
                 }
             }
 
-            const unique = [];
-            const keys = new Set();
+            // -------- 3. Build date anchors from Brabio's actual header --------
+            // This is more reliable than assuming the visible month.
+            const dateAnchors = [];
+
+            for (const entry of entries) {
+                const monthNodes = [];
+
+                for (const el of Array.from(
+                    entry.doc.querySelectorAll('div,span,td,th')
+                )) {
+                    if (!visible(entry, el)) continue;
+
+                    const t = textOf(el);
+                    const m = t.match(/^(20\\d{2})年(\\d{1,2})月$/);
+
+                    if (!m) continue;
+
+                    monthNodes.push({
+                        r: rectFor(entry, el),
+                        year: Number(m[1]),
+                        month: Number(m[2])
+                    });
+                }
+
+                const dayNodes = [];
+
+                for (const el of Array.from(
+                    entry.doc.querySelectorAll('div,span,td,th')
+                )) {
+                    if (!visible(entry, el)) continue;
+
+                    const t = textOf(el);
+
+                    if (!/^(?:[1-9]|[12]\\d|3[01])$/.test(t)) continue;
+
+                    const r = rectFor(entry, el);
+
+                    if (r.width < 8 || r.width > 70) continue;
+                    if (r.height < 8 || r.height > 55) continue;
+
+                    dayNodes.push({
+                        r,
+                        day: Number(t)
+                    });
+                }
+
+                for (const day of dayNodes) {
+                    let bestMonth = null;
+                    let bestScore = Number.POSITIVE_INFINITY;
+
+                    for (const month of monthNodes) {
+                        const contains =
+                            day.r.cx >= month.r.left - 20 &&
+                            day.r.cx <= month.r.right + 20;
+
+                        const distance = Math.abs(
+                            day.r.cx - month.r.cx
+                        );
+
+                        const score = contains
+                            ? distance * 0.2
+                            : distance + 1000;
+
+                        if (score < bestScore) {
+                            bestScore = score;
+                            bestMonth = month;
+                        }
+                    }
+
+                    if (!bestMonth) continue;
+
+                    const date = new Date(
+                        bestMonth.year,
+                        bestMonth.month - 1,
+                        day.day
+                    );
+
+                    dateAnchors.push({
+                        x: day.r.cx,
+                        date
+                    });
+                }
+            }
+
+            dateAnchors.sort((a, b) => a.x - b.x);
+
+            // Remove duplicated day-label descendants.
+            const compactAnchors = [];
+
+            for (const anchor of dateAnchors) {
+                const duplicate = compactAnchors.some(existing =>
+                    Math.abs(existing.x - anchor.x) <= 2 &&
+                    iso(existing.date) === iso(anchor.date)
+                );
+
+                if (!duplicate) compactAnchors.push(anchor);
+            }
+
+            function dateFromX(x) {
+                if (compactAnchors.length >= 2) {
+                    let closest = compactAnchors[0];
+
+                    for (const a of compactAnchors) {
+                        if (Math.abs(a.x - x) < Math.abs(closest.x - x)) {
+                            closest = a;
+                        }
+                    }
+
+                    const distances = [];
+
+                    for (let i = 1; i < compactAnchors.length; i++) {
+                        const dx = compactAnchors[i].x - compactAnchors[i - 1].x;
+                        const dd = (
+                            compactAnchors[i].date.getTime() -
+                            compactAnchors[i - 1].date.getTime()
+                        ) / 86400000;
+
+                        if (dx > 5 && Math.abs(dd) >= 1 && Math.abs(dd) <= 3) {
+                            distances.push(dx / dd);
+                        }
+                    }
+
+                    let pxPerDay = 30;
+
+                    if (distances.length) {
+                        distances.sort((a, b) => a - b);
+                        pxPerDay = distances[Math.floor(distances.length / 2)];
+                    }
+
+                    const dayOffset = Math.round(
+                        (x - closest.x) / pxPerDay
+                    );
+
+                    const d = new Date(closest.date);
+                    d.setDate(d.getDate() + dayOffset);
+
+                    return d;
+                }
+
+                // Header not found: try project-wide date text.
+                const explicitDates = Array.from(
+                    allText.matchAll(
+                        /20\\d{2}[\\/年.\\-]\\d{1,2}[\\/月.\\-]\\d{1,2}/g
+                    )
+                )
+                .map(x => parseDate(x[0]))
+                .filter(Boolean);
+
+                if (explicitDates.length) {
+                    explicitDates.sort((a, b) => a - b);
+                    return explicitDates[0];
+                }
+
+                return new Date();
+            }
+
+            // -------- 4. Pair each task label with a bar on the same row --------
+            const results = [];
+
+            for (const label of labels) {
+                const nearbyBars = bars
+                    .filter(bar =>
+                        Math.abs(bar.r.cy - label.r.cy) <= 16 &&
+                        bar.r.left >= label.r.right - 5
+                    )
+                    .sort((a, b) => {
+                        // Prefer colored Brabio bars over gray background rails.
+                        if (Math.abs(a.sat - b.sat) > 4) {
+                            return b.sat - a.sat;
+                        }
+
+                        // Then prefer a reasonable task-bar width.
+                        const aPenalty = a.r.width > 1200 ? 500 : 0;
+                        const bPenalty = b.r.width > 1200 ? 500 : 0;
+
+                        return (
+                            (a.r.left - label.r.right) + aPenalty
+                        ) - (
+                            (b.r.left - label.r.right) + bPenalty
+                        );
+                    });
+
+                const bar = nearbyBars[0] || null;
+
+                const labelContainer =
+                    label.el.closest('tr,[role="row"],li') ||
+                    label.el.parentElement;
+
+                let context = textOf(labelContainer || label.el);
+
+                if (labelContainer) {
+                    context += ' ' + Array.from(
+                        labelContainer.attributes || []
+                    ).map(a => a.value).join(' ');
+                }
+
+                // Add nearby percentage / assignee text from the same visual row.
+                for (const entry of entries) {
+                    for (const node of Array.from(
+                        entry.doc.querySelectorAll('span,td,div,a')
+                    )) {
+                        if (!visible(entry, node)) continue;
+
+                        const r = rectFor(entry, node);
+
+                        if (Math.abs(r.cy - label.r.cy) > 13) continue;
+
+                        const t = textOf(node);
+
+                        if (
+                            /\\d{1,3}\\s*%/.test(t) ||
+                            /[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/i.test(t)
+                        ) {
+                            context += ' ' + t;
+                        }
+                    }
+                }
+
+                const explicitDates = Array.from(
+                    context.matchAll(
+                        /20\\d{2}[\\/年.\\-]\\d{1,2}[\\/月.\\-]\\d{1,2}/g
+                    )
+                )
+                .map(x => parseDate(x[0]))
+                .filter(Boolean);
+
+                let startDate = null;
+                let endDate = null;
+
+                if (explicitDates.length >= 1) {
+                    startDate = explicitDates[0];
+                    endDate = explicitDates[1] || explicitDates[0];
+                } else if (bar) {
+                    startDate = dateFromX(bar.r.left);
+                    endDate = dateFromX(bar.r.right);
+                } else {
+                    // Keep the task visible even when Brabio has no painted bar.
+                    startDate = dateFromX(label.r.right + 40);
+                    endDate = startDate;
+                }
+
+                if (endDate < startDate) {
+                    endDate = startDate;
+                }
+
+                const progressMatch = context.match(/(\\d{1,3})\\s*%/);
+
+                const progress = progressMatch
+                    ? Math.max(
+                        0,
+                        Math.min(100, Number(progressMatch[1]))
+                    )
+                    : 0;
+
+                const emailMatch = context.match(
+                    /[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/i
+                );
+
+                let assignee = emailMatch
+                    ? emailMatch[0]
+                    : '未指定';
+
+                results.push({
+                    name: label.name,
+                    start: iso(startDate),
+                    end: iso(endDate),
+                    progress,
+                    assignee,
+                    y: label.r.cy
+                });
+            }
+
+            // -------- 5. Final visual-row de-duplication --------
+            results.sort((a, b) => a.y - b.y);
+
+            const final = [];
 
             for (const item of results) {
-                const key =
-                    `${item.name}|${item.start}|${item.end}|${item.assignee}`;
+                const duplicate = final.some(existing =>
+                    existing.name === item.name &&
+                    Math.abs(existing.y - item.y) <= 7
+                );
 
-                if (keys.has(key)) continue;
-                keys.add(key);
-                unique.push(item);
+                if (!duplicate) {
+                    final.push(item);
+                }
             }
 
             return {
-                tasks: unique.slice(0, 300),
-                debug: `frames:${debug.docs - 1} rows:${debug.rows} bars:${debug.bars} attrs:${debug.attributeHits} text:${debug.textCandidates}`
+                tasks: final.slice(0, 400),
+                debug:
+                    `frames:${entries.length - 1} ` +
+                    `labels:${labels.length} ` +
+                    `bars:${bars.length} ` +
+                    `dates:${compactAnchors.length}`
             };
         })();
         """
@@ -978,6 +1076,7 @@ final class BrowserModel: ObservableObject {
                     }
 
                     let end = max(start, endRaw)
+
                     let progress =
                         (item["progress"] as? NSNumber)?.intValue ?? 0
 
@@ -1004,36 +1103,23 @@ final class BrowserModel: ObservableObject {
                     )
                 }
 
-                let unique = Dictionary(
-                    grouping: parsed,
-                    by: {
-                        "\($0.name)|\(formatter.string(from: $0.start))|\(formatter.string(from: $0.end))|\($0.assignee)"
-                    }
-                )
-                .compactMap { $0.value.first }
-
-                let sorted = unique.sorted {
-                    if $0.start == $1.start {
-                        return $0.name < $1.name
-                    }
-
-                    return $0.start < $1.start
-                }
-
-                if sorted.isEmpty && attempt < 4 {
+                if parsed.isEmpty && attempt < 4 {
                     self.syncState = .syncing
 
                     try? await Task.sleep(
-                        nanoseconds: UInt64(1_200_000_000 + attempt * 500_000_000)
+                        nanoseconds: UInt64(
+                            1_300_000_000 +
+                            attempt * 500_000_000
+                        )
                     )
 
                     self.extractTasks(attempt: attempt + 1)
                     return
                 }
 
-                self.tasks = sorted
+                self.tasks = parsed
 
-                if sorted.isEmpty {
+                if parsed.isEmpty {
                     self.syncState = .failed(
                         "未讀到任務資料（\(self.diagnosticText)）"
                     )

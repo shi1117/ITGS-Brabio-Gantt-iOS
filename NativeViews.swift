@@ -151,7 +151,11 @@ struct ProjectWorkspaceView: View {
                     .font(.system(size: 17, weight: .bold))
                     .lineLimit(1)
 
-                Text(model.syncState.title)
+                Text(
+                    model.syncState == .ready
+                    ? "已同步 · \(model.tasks.count) 項"
+                    : model.syncState.title
+                )
                     .font(.caption)
                     .foregroundStyle(model.syncState == .ready ? Color.secondary : Color.orange)
             }
