@@ -7,11 +7,13 @@
     <key>CFBundleName</key>
     <string>ITGSBrabioGantt</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.4.0</string>
+    <string>0.8.0</string>
     <key>CFBundleVersion</key>
-    <string>5</string>
-    <key>UILaunchScreen</key>
-    <dict/>
+    <string>8</string>
+    <key>UILaunchStoryboardName</key>
+    <string>LaunchScreen</string>
+    <key>UIRequiresFullScreen</key>
+    <true/>
     <key>UISupportedInterfaceOrientations</key>
     <array>
         <string>UIInterfaceOrientationPortrait</string>
