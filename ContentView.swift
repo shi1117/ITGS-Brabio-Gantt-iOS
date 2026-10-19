@@ -12,8 +12,16 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
+            // Brabio stays alive in the background for login/session/data sync.
+            // IMPORTANT: keep it screen-sized. The old 1024x768 hidden view enlarged
+            // the whole SwiftUI layout and caused the "blank rows / clipped page" issue.
+            WebView(model: model, url: startURL, desktopViewport: true)
+                .ignoresSafeArea()
+                .opacity(model.showOriginalBrowser ? 1.0 : 0.001)
+                .allowsHitTesting(model.showOriginalBrowser)
+
             if model.showOriginalBrowser {
-                originalBrowser
+                originalBrowserControls
             } else if !model.authCheckComplete {
                 loadingView
             } else if model.needsLogin {
@@ -41,17 +49,11 @@ struct ContentView: View {
                         ProjectWorkspaceView(model: model)
                     }
                 }
-            }
-
-            if !model.showOriginalBrowser {
-                WebView(model: model, url: startURL, desktopViewport: true)
-                    .frame(width: 1024, height: 768)
-                    .offset(x: -5000, y: -5000)
-                    .opacity(0.01)
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
+                .background(Color(uiColor: .systemBackground))
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(uiColor: .systemBackground))
         .environment(\.colorScheme, .light)
         .alert("同步錯誤", isPresented: Binding(
             get: { model.errorMessage != nil },
@@ -64,22 +66,25 @@ struct ContentView: View {
         }
     }
 
-    private var originalBrowser: some View {
-        ZStack(alignment: .topTrailing) {
-            WebView(model: model, url: startURL, desktopViewport: false)
-                .ignoresSafeArea()
+    private var originalBrowserControls: some View {
+        VStack {
+            HStack {
+                Spacer()
 
-            Button {
-                model.closeOriginalBrowser()
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(.black)
-                    .frame(width: 42, height: 42)
-                    .background(.ultraThinMaterial, in: Circle())
+                Button {
+                    model.closeOriginalBrowser()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(.black)
+                        .frame(width: 42, height: 42)
+                        .background(.ultraThinMaterial, in: Circle())
+                }
+                .padding(.top, 8)
+                .padding(.trailing, 8)
             }
-            .padding(.top, 8)
-            .padding(.trailing, 8)
+
+            Spacer()
         }
     }
 
@@ -126,128 +131,131 @@ private struct LoginView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 22) {
-                Spacer(minLength: 34)
+        ZStack {
+            Color.white.ignoresSafeArea()
 
-                ZStack {
-                    Circle()
-                        .fill(Color.orange)
-                        .frame(width: 70, height: 70)
+            ScrollView {
+                VStack(spacing: 22) {
+                    Spacer(minLength: 34)
 
-                    Image(systemName: "chart.bar.fill")
-                        .font(.system(size: 30, weight: .bold))
-                        .foregroundStyle(.white)
-                }
+                    ZStack {
+                        Circle()
+                            .fill(Color.orange)
+                            .frame(width: 70, height: 70)
 
-                VStack(spacing: 5) {
-                    Text("Brabio Gantt")
-                        .font(.system(size: 32, weight: .bold, design: .rounded))
-                        .foregroundStyle(.black)
-
-                    Text("專案甘特圖管理")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(.black)
-                }
-
-                VStack(spacing: 14) {
-                    HStack(spacing: 12) {
-                        Image(systemName: "envelope")
-                            .foregroundStyle(.black)
-
-                        TextField(
-                            "",
-                            text: $account,
-                            prompt: Text("帳號 / Email").foregroundColor(.black)
-                        )
-                        .foregroundStyle(.black)
-                        .keyboardType(.emailAddress)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .textContentType(.username)
-                        .focused($focused, equals: .account)
-                        .submitLabel(.next)
-                        .onSubmit { focused = .password }
-                    }
-                    .padding(.horizontal, 16)
-                    .frame(height: 58)
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 16)
-                            .stroke(Color.black.opacity(0.25), lineWidth: 1)
+                        Image(systemName: "chart.bar.fill")
+                            .font(.system(size: 30, weight: .bold))
+                            .foregroundStyle(.white)
                     }
 
-                    HStack(spacing: 12) {
-                        Image(systemName: "lock")
+                    VStack(spacing: 5) {
+                        Text("Brabio Gantt")
+                            .font(.system(size: 32, weight: .bold, design: .rounded))
                             .foregroundStyle(.black)
 
-                        SecureField(
-                            "",
-                            text: $password,
-                            prompt: Text("密碼").foregroundColor(.black)
-                        )
-                        .foregroundStyle(.black)
-                        .textContentType(.password)
-                        .focused($focused, equals: .password)
-                        .submitLabel(.go)
-                        .onSubmit {
+                        Text("專案甘特圖管理")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(.black)
+                    }
+
+                    VStack(spacing: 14) {
+                        HStack(spacing: 12) {
+                            Image(systemName: "envelope")
+                                .foregroundStyle(.black)
+
+                            TextField(
+                                "",
+                                text: $account,
+                                prompt: Text("帳號 / Email").foregroundColor(.black)
+                            )
+                            .foregroundStyle(.black)
+                            .keyboardType(.emailAddress)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .textContentType(.username)
+                            .focused($focused, equals: .account)
+                            .submitLabel(.next)
+                            .onSubmit { focused = .password }
+                        }
+                        .padding(.horizontal, 16)
+                        .frame(height: 58)
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 16)
+                                .stroke(Color.black.opacity(0.25), lineWidth: 1)
+                        }
+
+                        HStack(spacing: 12) {
+                            Image(systemName: "lock")
+                                .foregroundStyle(.black)
+
+                            SecureField(
+                                "",
+                                text: $password,
+                                prompt: Text("密碼").foregroundColor(.black)
+                            )
+                            .foregroundStyle(.black)
+                            .textContentType(.password)
+                            .focused($focused, equals: .password)
+                            .submitLabel(.go)
+                            .onSubmit {
+                                focused = nil
+                                onLogin(account, password, remember)
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                        .frame(height: 58)
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 16)
+                                .stroke(Color.black.opacity(0.25), lineWidth: 1)
+                        }
+
+                        Toggle("記住登入狀態", isOn: $remember)
+                            .tint(.black)
+                            .foregroundStyle(.black)
+
+                        Button {
                             focused = nil
                             onLogin(account, password, remember)
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .frame(height: 58)
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 16)
-                            .stroke(Color.black.opacity(0.25), lineWidth: 1)
-                    }
+                        } label: {
+                            HStack {
+                                if isLoading {
+                                    ProgressView()
+                                        .tint(.white)
+                                }
 
-                    Toggle("記住登入狀態", isOn: $remember)
-                        .tint(.black)
-                        .foregroundStyle(.black)
-
-                    Button {
-                        focused = nil
-                        onLogin(account, password, remember)
-                    } label: {
-                        HStack {
-                            if isLoading {
-                                ProgressView()
-                                    .tint(.white)
+                                Text(isLoading ? "登入中…" : "登入")
+                                    .font(.system(size: 18, weight: .bold))
                             }
-
-                            Text(isLoading ? "登入中…" : "登入")
-                                .font(.system(size: 18, weight: .bold))
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 56)
+                            .foregroundStyle(.white)
+                            .background(Color.black, in: RoundedRectangle(cornerRadius: 16))
                         }
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 56)
-                        .foregroundStyle(.white)
-                        .background(Color.black, in: RoundedRectangle(cornerRadius: 16))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(isLoading)
+                        .buttonStyle(.plain)
+                        .disabled(isLoading)
 
-                    if let message {
-                        Text(message)
-                            .font(.footnote)
-                            .foregroundStyle(.red)
-                            .multilineTextAlignment(.center)
-                    }
+                        if let message {
+                            Text(message)
+                                .font(.footnote)
+                                .foregroundStyle(.red)
+                                .multilineTextAlignment(.center)
+                        }
 
-                    Button("使用 Brabio 原始登入頁") {
-                        onOriginalLogin()
+                        Button("使用 Brabio 原始登入頁") {
+                            onOriginalLogin()
+                        }
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.black)
+                        .padding(.top, 4)
                     }
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.black)
-                    .padding(.top, 4)
+                    .padding(.horizontal, 24)
+
+                    Spacer(minLength: 140)
                 }
-                .padding(.horizontal, 24)
-
-                Spacer(minLength: 140)
+                .frame(maxWidth: 520)
+                .frame(maxWidth: .infinity)
             }
-            .frame(maxWidth: 520)
-            .frame(maxWidth: .infinity)
+            .scrollDismissesKeyboard(.interactively)
         }
-        .scrollDismissesKeyboard(.interactively)
-        .background(Color.white)
     }
 }

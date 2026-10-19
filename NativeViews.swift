@@ -5,8 +5,7 @@ struct NativeProjectListView: View {
     let openProject: (ProjectItem) -> Void
 
     var body: some View {
-        NavigationStack {
-            Group {
+        Group {
                 if model.projects.isEmpty {
                     emptyState
                 } else {
@@ -56,9 +55,8 @@ struct NativeProjectListView: View {
                     }
                 }
             }
-            .safeAreaInset(edge: .bottom) {
-                syncBanner
-            }
+        .safeAreaInset(edge: .bottom) {
+            syncBanner
         }
     }
 

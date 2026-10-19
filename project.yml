@@ -15,6 +15,7 @@ targets:
     type: application
     platform: iOS
     deploymentTarget: "16.0"
+
     sources:
       - path: AppConfig.swift
       - path: Models.swift
@@ -23,14 +24,14 @@ targets:
       - path: NativeViews.swift
       - path: ContentView.swift
       - path: ITGSBrabioGanttApp.swift
-    resources:
       - path: LaunchScreen.storyboard
-    info:
-      path: Info.plist
+        buildPhase: resources
+
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.itgs.brabiogantt
         PRODUCT_NAME: ITGSBrabioGantt
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
+        INFOPLIST_FILE: Info.plist
         GENERATE_INFOPLIST_FILE: NO
