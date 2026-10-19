@@ -271,8 +271,16 @@ struct NativeGanttView: View {
                     HStack(alignment: .top, spacing: 0) {
                         labelColumn
 
-                        ScrollView(.horizontal, showsIndicators: true) {
-                            timeline
+                        ScrollViewReader { proxy in
+                            ScrollView(.horizontal, showsIndicators: true) {
+                                timeline
+                            }
+                            .onAppear {
+                                scrollTimelineToToday(proxy)
+                            }
+                            .onChange(of: tasks.map(\.id)) { _ in
+                                scrollTimelineToToday(proxy)
+                            }
                         }
                     }
                 }
@@ -340,6 +348,7 @@ struct NativeGanttView: View {
                     .overlay(alignment: .trailing) {
                         Divider()
                     }
+                    .id(day)
                 }
             }
             .background(Color(uiColor: .secondarySystemBackground))
@@ -357,6 +366,31 @@ struct NativeGanttView: View {
                     Divider()
                 }
             }
+        }
+    }
+
+    private var todayScrollTarget: Date? {
+        guard let range else { return nil }
+
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+
+        if today < range.lowerBound {
+            return range.lowerBound
+        }
+
+        if today > range.upperBound {
+            return range.upperBound
+        }
+
+        return today
+    }
+
+    private func scrollTimelineToToday(_ proxy: ScrollViewProxy) {
+        guard let target = todayScrollTarget else { return }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            proxy.scrollTo(target, anchor: .center)
         }
     }
 

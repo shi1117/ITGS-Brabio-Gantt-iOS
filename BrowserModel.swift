@@ -2121,11 +2121,10 @@ final class BrowserModel: ObservableObject {
         taskDetailMessage = nil
 
         let target = min(max(progress, 0), 100)
-        let taskNameJSON = jsonLiteral(task.name)
 
         let js = """
         (function() {
-            const taskName = \(taskNameJSON);
+            const target = \(target);
 
             function docs(root) {
                 const out = [root];
@@ -2162,118 +2161,89 @@ final class BrowserModel: ObservableObject {
             }
 
             for (const d of docs(document)) {
-                const titleHits = Array.from(
-                    d.querySelectorAll(
-                        'h1,h2,h3,strong,a,span,div,td'
-                    )
+                const progressLabels = Array.from(
+                    d.querySelectorAll('div,span,td,p,label,strong')
                 )
-                .filter(el =>
-                    visible(d, el) &&
-                    clean(
-                        el.innerText ||
-                        el.textContent
-                    ) === taskName
-                )
+                .filter(el => visible(d, el))
                 .map(el => ({
                     el,
+                    text: clean(el.innerText || el.textContent),
                     r: el.getBoundingClientRect()
                 }))
-                .sort((a, b) =>
-                    b.r.left - a.r.left
-                );
-
-                if (!titleHits.length) continue;
-
-                const titleLeft = titleHits[0].r.left;
-
-                const selects = Array.from(
-                    d.querySelectorAll('select')
+                .filter(item =>
+                    /^進捗(?:\\s|$)/.test(item.text)
                 )
-                .filter(el =>
-                    visible(d, el) &&
-                    el.getBoundingClientRect().left
-                        >= titleLeft - 100
-                );
+                .sort((a, b) => b.r.left - a.r.left);
 
-                for (const select of selects) {
-                    const options = Array.from(
-                        select.options || []
-                    );
+                for (const label of progressLabels) {
+                    const selects = Array.from(
+                        d.querySelectorAll('select')
+                    )
+                    .filter(el => visible(d, el))
+                    .map(el => ({
+                        el,
+                        r: el.getBoundingClientRect()
+                    }))
+                    .filter(item =>
+                        Math.abs(item.r.top - label.r.top) <= 45 &&
+                        item.r.left >= label.r.left - 20
+                    )
+                    .sort((a, b) => a.r.left - b.r.left);
 
-                    const percentOptions = options.filter(
-                        option =>
+                    for (const item of selects) {
+                        const select = item.el;
+                        const options = Array.from(select.options || []);
+
+                        const percentOptions = options.filter(option =>
                             /^\\s*\\d{1,3}\\s*%\\s*$/.test(
                                 option.textContent || ''
                             )
-                    );
+                        );
 
-                    if (percentOptions.length < 2) {
-                        continue;
-                    }
+                        if (percentOptions.length < 2) continue;
 
-                    const exact = percentOptions.find(
-                        option => {
-                            const m =
-                                (option.textContent || '')
-                                .match(
-                                    /(\\d{1,3})\\s*%/
-                                );
+                        const exact = percentOptions.find(option => {
+                            const m = (option.textContent || '')
+                                .match(/(\\d{1,3})\\s*%/);
 
-                            return (
-                                m &&
-                                Number(m[1])
-                                    === \(target)
-                            );
+                            return m && Number(m[1]) === target;
+                        });
+
+                        if (!exact) continue;
+
+                        try {
+                            const setter = Object
+                                .getOwnPropertyDescriptor(
+                                    d.defaultView.HTMLSelectElement.prototype,
+                                    'value'
+                                )?.set;
+
+                            if (setter) {
+                                setter.call(select, exact.value);
+                            } else {
+                                select.value = exact.value;
+                            }
+                        } catch (_) {
+                            select.value = exact.value;
                         }
-                    );
 
-                    if (!exact) continue;
+                        select.dispatchEvent(
+                            new Event('input', { bubbles: true })
+                        );
 
-                    try {
-                        const setter = Object
-                            .getOwnPropertyDescriptor(
-                                d.defaultView
-                                    .HTMLSelectElement
-                                    .prototype,
-                                'value'
-                            )?.set;
+                        select.dispatchEvent(
+                            new Event('change', { bubbles: true })
+                        );
 
-                        if (setter) {
-                            setter.call(
-                                select,
-                                exact.value
-                            );
-                        } else {
-                            select.value =
-                                exact.value;
-                        }
-                    } catch (_) {
-                        select.value =
-                            exact.value;
+                        try {
+                            select.blur();
+                        } catch (_) {}
+
+                        return {
+                            status: 'changed',
+                            progress: target
+                        };
                     }
-
-                    select.dispatchEvent(
-                        new Event(
-                            'input',
-                            { bubbles: true }
-                        )
-                    );
-
-                    select.dispatchEvent(
-                        new Event(
-                            'change',
-                            { bubbles: true }
-                        )
-                    );
-
-                    try {
-                        select.blur();
-                    } catch (_) {}
-
-                    return {
-                        status: 'changed',
-                        progress: \(target)
-                    };
                 }
             }
 
@@ -2302,15 +2272,13 @@ final class BrowserModel: ObservableObject {
                 guard status == "changed" else {
                     self.taskProgressSaving = false
                     self.taskDetailMessage =
-                        "找不到這個任務的 Brabio 進度選單"
+                        "找不到 Brabio 的百分比進度選單"
                     return
                 }
 
                 if let index =
                     self.tasks.firstIndex(
-                        where: {
-                            $0.id == task.id
-                        }
+                        where: { $0.id == task.id }
                     ) {
                     let old = self.tasks[index]
 
@@ -2355,13 +2323,10 @@ final class BrowserModel: ObservableObject {
         taskContentSaving = true
         taskDetailMessage = nil
 
-        let taskNameJSON = jsonLiteral(task.name)
         let contentJSON = jsonLiteral(content)
 
         let openEditJS = """
         (function() {
-            const taskName = \(taskNameJSON);
-
             function docs(root) {
                 const out = [root];
 
@@ -2395,78 +2360,59 @@ final class BrowserModel: ObservableObject {
                     .trim();
             }
 
-            function findRoot(d) {
-                const titles = Array.from(
-                    d.querySelectorAll('h1,h2,h3,strong,a,span,div,td')
+            for (const d of docs(document)) {
+                const changes = Array.from(
+                    d.querySelectorAll('a,button,[onclick]')
                 )
                 .filter(el => visible(d, el))
                 .filter(el =>
-                    clean(el.innerText || el.textContent) === taskName
-                )
-                .map(el => ({
-                    el,
-                    r: el.getBoundingClientRect()
-                }))
-                .sort((a, b) => b.r.left - a.r.left);
+                    clean(
+                        el.innerText ||
+                        el.value ||
+                        el.textContent
+                    ) === '変更する'
+                );
 
-                for (const title of titles) {
-                    let root = title.el;
+                const candidates = [];
 
-                    for (let depth = 0; root && depth < 10; depth++) {
-                        const text = clean(root.innerText || root.textContent);
-                        const r = root.getBoundingClientRect();
+                for (const change of changes) {
+                    let root = change.parentElement;
 
-                        const hits = [
-                            /期間/.test(text),
-                            /進捗/.test(text),
-                            /内容/.test(text),
-                            /添付ファイル/.test(text)
-                        ].filter(Boolean).length;
+                    for (
+                        let depth = 0;
+                        root && depth < 5;
+                        depth++
+                    ) {
+                        const rootText = clean(
+                            root.innerText || root.textContent
+                        );
 
                         if (
-                            hits >= 2 &&
-                            r.width >= 450 &&
-                            r.height >= 150
+                            /コピーする/.test(rootText) &&
+                            /削除する/.test(rootText)
                         ) {
-                            return root;
+                            const r = change.getBoundingClientRect();
+
+                            candidates.push({
+                                el: change,
+                                top: r.top,
+                                left: r.left
+                            });
+
+                            break;
                         }
 
                         root = root.parentElement;
                     }
                 }
 
-                return null;
-            }
+                candidates.sort((a, b) => {
+                    if (Math.abs(a.top - b.top) > 5) {
+                        return a.top - b.top;
+                    }
 
-            for (const d of docs(document)) {
-                const root = findRoot(d);
-                if (!root) continue;
-
-                const candidates = Array.from(
-                    root.querySelectorAll('a,button,[onclick]')
-                )
-                .filter(el => visible(d, el))
-                .filter(el =>
-                    clean(el.innerText || el.textContent || el.value) === '変更する'
-                )
-                .map(el => {
-                    const parentText = clean(
-                        el.parentElement?.innerText ||
-                        el.parentElement?.textContent ||
-                        ''
-                    );
-
-                    let score = 0;
-
-                    if (/コピーする/.test(parentText)) score += 100;
-                    if (/削除する/.test(parentText)) score += 100;
-
-                    const r = el.getBoundingClientRect();
-                    score += Math.max(0, 80 - r.top * 0.02);
-
-                    return { el, score };
-                })
-                .sort((a, b) => b.score - a.score);
+                    return b.left - a.left;
+                });
 
                 if (!candidates.length) continue;
 
@@ -2496,11 +2442,11 @@ final class BrowserModel: ObservableObject {
                 guard (result as? String) == "edit-clicked" else {
                     self.taskContentSaving = false
                     self.taskDetailMessage =
-                        "找不到這個任務的「変更する」"
+                        "找不到任務右上方的「変更する」"
                     return
                 }
 
-                try? await Task.sleep(nanoseconds: 700_000_000)
+                try? await Task.sleep(nanoseconds: 750_000_000)
 
                 let saveJS = """
                 (function() {
@@ -2645,9 +2591,12 @@ final class BrowserModel: ObservableObject {
                             return
                         }
 
-                        self.taskDetailMessage = "內容已送出到 Brabio"
+                        self.taskDetailMessage =
+                            "內容已送出到 Brabio"
 
-                        try? await Task.sleep(nanoseconds: 1_000_000_000)
+                        try? await Task.sleep(
+                            nanoseconds: 1_000_000_000
+                        )
 
                         self.taskContentSaving = false
                         self.openTaskDetail(task)
@@ -2725,89 +2674,24 @@ final class BrowserModel: ObservableObject {
                     .trim();
             }
 
-            const entries = docs(document);
-            let titleHit = null;
-
-            // Brabio shows the same task name twice:
-            // left tree + right detail title.
-            // The RIGHTMOST exact hit is the detail title we need.
-            for (const entry of entries) {
-                for (const el of Array.from(
+            function textItems(entry) {
+                return Array.from(
                     entry.doc.querySelectorAll(
-                        'h1,h2,h3,strong,a,span,div,td'
+                        'div,span,td,p,a,label,strong,pre,h1,h2,h3'
                     )
-                )) {
-                    if (!visible(entry, el)) continue;
-
-                    const text = clean(
-                        el.innerText || el.textContent
-                    );
-
-                    if (text !== taskName) continue;
-
-                    const r = rect(entry, el);
-
-                    let quality = r.left * 10;
-
-                    if (/^H[1-3]$/.test(el.tagName)) {
-                        quality += 5000;
-                    }
-
-                    if (r.width > 120) {
-                        quality += 500;
-                    }
-
-                    if (
-                        !titleHit ||
-                        quality > titleHit.quality
-                    ) {
-                        titleHit = {
-                            entry,
-                            el,
-                            r,
-                            quality
-                        };
-                    }
-                }
-            }
-
-            if (!titleHit) {
-                return {
-                    status: 'detail-title-not-found'
-                };
-            }
-
-            const entry = titleHit.entry;
-            const d = entry.doc;
-            const titleLeft = titleHit.r.left;
-
-            // Everything materially to the right of the title's left edge belongs
-            // to the task detail pane. This is stable even though old Brabio
-            // splits the detail pane across several sibling containers.
-            function inDetailPane(el) {
-                if (!visible(entry, el)) return false;
-
-                const r = rect(entry, el);
-
-                return r.left >= titleLeft - 100;
-            }
-
-            const nodes = Array.from(
-                d.querySelectorAll(
-                    'div,span,td,p,a,label,strong,pre'
                 )
-            )
-            .filter(inDetailPane)
-            .map(el => ({
-                el,
-                text: clean(el.innerText || el.textContent),
-                r: rect(entry, el)
-            }));
+                .filter(el => visible(entry, el))
+                .map(el => ({
+                    el,
+                    text: clean(el.innerText || el.textContent),
+                    r: rect(entry, el)
+                }))
+                .filter(item => item.text.length > 0);
+            }
 
-            function shortestMatching(regex, maxLength = 260) {
-                return nodes
+            function exactOrShort(items, regex, maxLength = 220) {
+                return items
                     .filter(item =>
-                        item.text.length > 0 &&
                         item.text.length <= maxLength &&
                         regex.test(item.text)
                     )
@@ -2817,45 +2701,251 @@ final class BrowserModel: ObservableObject {
                         }
 
                         return a.r.top - b.r.top;
-                    })[0]?.text || '';
+                    })[0] || null;
             }
 
-            const period =
-                shortestMatching(
-                    /\\d{1,2}\\/\\d{1,2}.*～.*\\d{1,2}\\/\\d{1,2}/,
-                    180
-                ) ||
-                shortestMatching(
-                    /^期間\\s+.*\\d{1,2}\\/\\d{1,2}/,
-                    220
+            const entries = docs(document);
+            let chosen = null;
+
+            for (const entry of entries) {
+                const items = textItems(entry);
+
+                const contentTabs = items.filter(item =>
+                    item.text === '内容'
                 );
 
-            const lastUpdated = shortestMatching(
-                /最終更新/,
-                220
-            );
+                for (const contentTab of contentTabs) {
+                    const attachmentTabs = items
+                        .filter(item =>
+                            /^添付ファイル/.test(item.text) &&
+                            Math.abs(item.r.cy - contentTab.r.cy) <= 40 &&
+                            item.r.left >= contentTab.r.left
+                        )
+                        .sort((a, b) =>
+                            Math.abs(a.r.left - contentTab.r.right) -
+                            Math.abs(b.r.left - contentTab.r.right)
+                        );
 
-            const registeredBy = shortestMatching(
-                /^登録/,
-                180
-            );
+                    if (!attachmentTabs.length) continue;
 
-            const updatedBy = shortestMatching(
-                /^更新/,
-                180
-            );
+                    const attachmentTab = attachmentTabs[0];
 
-            // Progress/status selects from the right task pane only.
-            const selects = Array.from(
-                d.querySelectorAll('select')
+                    // Real task detail has 期間 / 進捗 immediately above these tabs.
+                    const upperItems = items.filter(item =>
+                        item.r.bottom <= contentTab.r.top + 5 &&
+                        item.r.top >= contentTab.r.top - 320 &&
+                        item.r.right >= contentTab.r.left - 120
+                    );
+
+                    const periodHit =
+                        exactOrShort(
+                            upperItems,
+                            /\\d{1,2}\\/\\d{1,2}.*～.*\\d{1,2}\\/\\d{1,2}/,
+                            220
+                        ) ||
+                        exactOrShort(
+                            upperItems,
+                            /^期間(?:\\s|$)/,
+                            220
+                        );
+
+                    const progressLabel =
+                        exactOrShort(
+                            upperItems,
+                            /^進捗(?:\\s|$)/,
+                            120
+                        );
+
+                    const titleHit = items
+                        .filter(item =>
+                            item.text === taskName &&
+                            item.r.bottom <= contentTab.r.top + 5 &&
+                            item.r.top >= contentTab.r.top - 260
+                        )
+                        .sort((a, b) => b.r.left - a.r.left)[0] || null;
+
+                    let score = 0;
+
+                    score += contentTab.r.left * 0.5;
+                    if (periodHit) score += 1000;
+                    if (progressLabel) score += 1000;
+                    if (titleHit) score += 1500;
+
+                    if (!chosen || score > chosen.score) {
+                        chosen = {
+                            entry,
+                            items,
+                            contentTab,
+                            attachmentTab,
+                            periodHit,
+                            progressLabel,
+                            titleHit,
+                            score
+                        };
+                    }
+                }
+            }
+
+            if (!chosen) {
+                return {
+                    status: 'detail-tabs-not-found'
+                };
+            }
+
+            const entry = chosen.entry;
+            const d = entry.doc;
+            const items = chosen.items;
+            const contentTab = chosen.contentTab;
+            const attachmentTab = chosen.attachmentTab;
+
+            // Find the comment box. Its width tells us the real main content column,
+            // which excludes the member / 足あと sidebar on the right.
+            const commentFields = Array.from(
+                d.querySelectorAll('input,textarea')
             )
-            .filter(inDetailPane);
+            .filter(el => visible(entry, el))
+            .map(el => ({
+                el,
+                placeholder: clean(
+                    el.getAttribute('placeholder') || ''
+                ),
+                r: rect(entry, el)
+            }))
+            .filter(item =>
+                /コメント/.test(item.placeholder) &&
+                item.r.top > contentTab.r.bottom - 5
+            )
+            .sort((a, b) =>
+                Math.abs(a.r.left - contentTab.r.left) -
+                Math.abs(b.r.left - contentTab.r.left)
+            );
+
+            const commentField = commentFields[0] || null;
+
+            const mainLeft = commentField
+                ? commentField.r.left - 12
+                : contentTab.r.left - 12;
+
+            const mainRight = commentField
+                ? commentField.r.right + 12
+                : Math.max(
+                    attachmentTab.r.right + 500,
+                    contentTab.r.right + 700
+                );
+
+            const lowerBound = Math.max(
+                contentTab.r.bottom,
+                attachmentTab.r.bottom
+            ) + 4;
+
+            const upperBound = commentField
+                ? commentField.r.top - 5
+                : lowerBound + 300;
+
+            // Read actual visible text nodes from the content region.
+            // This avoids picking a giant parent DIV containing unrelated UI.
+            const walker = d.createTreeWalker(
+                d.body,
+                NodeFilter.SHOW_TEXT
+            );
+
+            const contentParts = [];
+            const seenContent = new Set();
+
+            while (walker.nextNode()) {
+                const node = walker.currentNode;
+                const parent = node.parentElement;
+
+                if (!parent || !visible(entry, parent)) continue;
+
+                const r = rect(entry, parent);
+                let value = clean(node.nodeValue || '');
+
+                if (!value) continue;
+
+                if (r.top < lowerBound || r.top >= upperBound) continue;
+                if (r.right < mainLeft || r.left > mainRight) continue;
+
+                if (
+                    value === '内容' ||
+                    /^添付ファイル/.test(value) ||
+                    value === '添付する' ||
+                    /^\\d+ファイル$/.test(value) ||
+                    value === '全て表示' ||
+                    /コメント/.test(value)
+                ) {
+                    continue;
+                }
+
+                if (
+                    /^(メンバー|あしあと|コピーする|変更する|削除する)$/.test(value)
+                ) {
+                    continue;
+                }
+
+                if (!seenContent.has(value)) {
+                    seenContent.add(value);
+                    contentParts.push(value);
+                }
+            }
+
+            const content = contentParts.join('\\n').trim();
+
+            // Period.
+            const upperItems = items.filter(item =>
+                item.r.bottom <= contentTab.r.top + 5 &&
+                item.r.top >= contentTab.r.top - 340 &&
+                item.r.right >= contentTab.r.left - 160
+            );
+
+            const periodItem =
+                exactOrShort(
+                    upperItems,
+                    /\\d{1,2}\\/\\d{1,2}.*～.*\\d{1,2}\\/\\d{1,2}/,
+                    240
+                ) ||
+                exactOrShort(
+                    upperItems,
+                    /^期間(?:\\s|$)/,
+                    240
+                );
+
+            const period = periodItem?.text || '';
+
+            // Progress label + selects on the same visual row.
+            const progressLabel =
+                chosen.progressLabel ||
+                exactOrShort(
+                    upperItems,
+                    /^進捗(?:\\s|$)/,
+                    140
+                );
 
             let progress = \(task.progress);
             let progressOptions = [];
             let statusText = '';
+            let progressSelectCount = 0;
 
-            for (const select of selects) {
+            const allSelects = Array.from(
+                d.querySelectorAll('select')
+            )
+            .filter(el => visible(entry, el))
+            .map(el => ({
+                el,
+                r: rect(entry, el)
+            }));
+
+            let candidateSelects = allSelects;
+
+            if (progressLabel) {
+                candidateSelects = allSelects.filter(item =>
+                    Math.abs(item.r.cy - progressLabel.r.cy) <= 36 &&
+                    item.r.left >= progressLabel.r.left - 20
+                );
+            }
+
+            for (const item of candidateSelects) {
+                const select = item.el;
                 const options = Array.from(select.options || []);
 
                 const percentOptions = options
@@ -2872,6 +2962,8 @@ final class BrowserModel: ObservableObject {
                     );
 
                 if (percentOptions.length >= 2) {
+                    progressSelectCount += 1;
+
                     progressOptions = Array.from(
                         new Set(percentOptions)
                     ).sort((a, b) => a - b);
@@ -2912,110 +3004,39 @@ final class BrowserModel: ObservableObject {
                 }
             }
 
-            const contentTab = nodes
-                .filter(item => item.text === '内容')
-                .sort((a, b) => a.r.top - b.r.top)[0];
+            const lastUpdated =
+                exactOrShort(
+                    upperItems,
+                    /最終更新/,
+                    220
+                )?.text || '';
 
-            const attachmentTab = nodes
-                .filter(item =>
-                    /^添付ファイル/.test(item.text)
-                )
-                .sort((a, b) => a.r.top - b.r.top)[0];
+            const registeredBy =
+                exactOrShort(
+                    upperItems,
+                    /^登録(?:\\s|$)/,
+                    180
+                )?.text || '';
 
-            const commentField = Array.from(
-                d.querySelectorAll('input,textarea')
-            )
-            .filter(inDetailPane)
-            .map(el => ({
-                el,
-                placeholder: clean(
-                    el.getAttribute('placeholder') || ''
-                ),
-                r: rect(entry, el)
-            }))
-            .find(item =>
-                /コメント/.test(item.placeholder)
-            );
+            const updatedBy =
+                exactOrShort(
+                    upperItems,
+                    /^更新(?:\\s|$)/,
+                    180
+                )?.text || '';
 
-            let content = '';
-
-            if (contentTab) {
-                const lowerBound = contentTab.r.bottom + 3;
-                const upperBound = commentField
-                    ? commentField.r.top - 4
-                    : lowerBound + 280;
-
-                const candidates = Array.from(
-                    d.querySelectorAll('div,td,p,pre')
-                )
-                .filter(inDetailPane)
-                .map(el => {
-                    const r = rect(entry, el);
-
-                    let text = clean(
-                        el.innerText || el.textContent
-                    );
-
-                    text = text
-                        .replace(/添付する/g, ' ')
-                        .replace(/\\d+ファイル/g, ' ')
-                        .replace(/全て表示/g, ' ')
-                        .replace(/\\s+/g, ' ')
-                        .trim();
-
-                    return {
-                        el,
-                        text,
-                        r,
-                        area: r.width * r.height
-                    };
-                })
-                .filter(item =>
-                    item.r.top >= lowerBound &&
-                    item.r.top < upperBound &&
-                    item.r.width >= 220 &&
-                    item.r.height >= 18 &&
-                    item.r.height <= 240 &&
-                    item.text.length >= 2 &&
-                    item.text.length <= 1400 &&
-                    item.text !== taskName &&
-                    !/^(内容|添付ファイル|期間|進捗|登録|更新|最終更新|メンバー)/.test(item.text) &&
-                    !/コメントはありません/.test(item.text) &&
-                    !/コピーする.*変更する.*削除する/.test(item.text)
-                )
-                .sort((a, b) => {
-                    const aDistance =
-                        Math.abs(a.r.top - lowerBound);
-
-                    const bDistance =
-                        Math.abs(b.r.top - lowerBound);
-
-                    if (
-                        Math.abs(aDistance - bDistance) > 4
-                    ) {
-                        return aDistance - bDistance;
-                    }
-
-                    return a.area - b.area;
-                });
-
-                if (candidates.length) {
-                    content = candidates[0].text;
-                }
-            }
-
-            const attachmentInfo =
-                attachmentTab?.text || '';
-
+            // Members.
             let members = [];
 
-            const memberHeading = nodes.find(item =>
-                /^メンバー(?:\\s|$)/.test(item.text)
-            );
+            const memberHeading = items
+                .filter(item =>
+                    /^メンバー(?:\\s|$)/.test(item.text) &&
+                    item.r.top >= contentTab.r.top - 20
+                )
+                .sort((a, b) => a.r.top - b.r.top)[0] || null;
 
             if (memberHeading) {
-                let memberRoot =
-                    memberHeading.el.parentElement;
+                let memberRoot = memberHeading.el.parentElement;
 
                 for (
                     let depth = 0;
@@ -3027,57 +3048,65 @@ final class BrowserModel: ObservableObject {
                     )
                     .filter(el => visible(entry, el))
                     .map(el =>
-                        clean(
-                            el.innerText ||
-                            el.textContent
-                        )
+                        clean(el.innerText || el.textContent)
                     )
-                    .filter(text =>
-                        text &&
-                        text.length <= 40 &&
-                        text !== '変更する' &&
-                        !/^メンバー/.test(text) &&
-                        !/^\\d+$/.test(text)
+                    .filter(value =>
+                        value &&
+                        value.length <= 40 &&
+                        value !== '変更する' &&
+                        !/^メンバー/.test(value) &&
+                        !/^\\d+$/.test(value)
                     );
 
                     if (names.length) {
-                        members =
-                            Array.from(new Set(names));
+                        members = Array.from(new Set(names));
                         break;
                     }
 
-                    memberRoot =
-                        memberRoot.parentElement;
+                    memberRoot = memberRoot.parentElement;
                 }
             }
 
-            // Only the top-right "変更する" beside コピーする/削除する
-            // counts as full task editing.
-            const editCandidates = Array.from(
-                d.querySelectorAll(
-                    'a,button,[onclick]'
-                )
+            // Find the TOP task-level "変更する", next to コピーする / 削除する.
+            let canEditContent = false;
+
+            const changeLinks = Array.from(
+                d.querySelectorAll('a,button,[onclick]')
             )
-            .filter(inDetailPane)
+            .filter(el => visible(entry, el))
             .filter(el =>
                 clean(
                     el.innerText ||
                     el.value ||
                     el.textContent
                 ) === '変更する'
-            )
-            .filter(el => {
-                const parentText = clean(
-                    el.parentElement?.innerText ||
-                    el.parentElement?.textContent ||
-                    ''
-                );
+            );
 
-                return (
-                    /コピーする/.test(parentText) ||
-                    /削除する/.test(parentText)
-                );
-            });
+            for (const change of changeLinks) {
+                let root = change.parentElement;
+
+                for (
+                    let depth = 0;
+                    root && depth < 4;
+                    depth++
+                ) {
+                    const rootText = clean(
+                        root.innerText || root.textContent
+                    );
+
+                    if (
+                        /コピーする/.test(rootText) &&
+                        /削除する/.test(rootText)
+                    ) {
+                        canEditContent = true;
+                        break;
+                    }
+
+                    root = root.parentElement;
+                }
+
+                if (canEditContent) break;
+            }
 
             return {
                 status: 'ok',
@@ -3091,13 +3120,13 @@ final class BrowserModel: ObservableObject {
                 updatedBy,
                 content,
                 members,
-                attachmentInfo,
-                canEditContent: editCandidates.length > 0,
+                attachmentInfo: attachmentTab.text,
+                canEditContent,
                 debug:
-                    `titleX:${Math.round(titleLeft)} ` +
-                    `nodes:${nodes.length} ` +
-                    `selects:${selects.length} ` +
-                    `content:${content.length}`
+                    `tabX:${Math.round(contentTab.r.left)} ` +
+                    `progressSelect:${progressSelectCount} ` +
+                    `content:${content.length} ` +
+                    `edit:${canEditContent ? 1 : 0}`
             };
         })();
         """
@@ -3171,8 +3200,7 @@ final class BrowserModel: ObservableObject {
                         ?? false
                 )
 
-                if let debug =
-                    object["debug"] as? String {
+                if let debug = object["debug"] as? String {
                     self.taskDetailMessage =
                         "已讀取 Brabio 任務資料（\(debug)）"
                 } else {
