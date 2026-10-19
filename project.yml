@@ -1,26 +1,32 @@
 name: ITGSBrabioGantt
+
 options:
   bundleIdPrefix: com.itgs
   deploymentTarget:
     iOS: "16.0"
+
 settings:
   base:
     SWIFT_VERSION: 5.0
     DEVELOPMENT_TEAM: ""
+
 targets:
   ITGSBrabioGantt:
     type: application
     platform: iOS
     deploymentTarget: "16.0"
     sources:
-      - path: ITGSBrabioGantt
+      - path: AppConfig.swift
+      - path: BrowserModel.swift
+      - path: ContentView.swift
+      - path: WebView.swift
+      - path: ITGSBrabioGanttApp.swift
     info:
-      path: ITGSBrabioGantt/Info.plist
+      path: Info.plist
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.itgs.brabiogantt
         PRODUCT_NAME: ITGSBrabioGantt
-        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
         GENERATE_INFOPLIST_FILE: NO
