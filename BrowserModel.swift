@@ -732,12 +732,13 @@ final class BrowserModel: ObservableObject {
 
             // ------------------------------------------------------------
             // A. Find the selected project in the LEFT tree.
+            // Prefer an actual link/clickable element, then the leftmost match.
             // ------------------------------------------------------------
             let projectMarker = null;
 
             for (const entry of entries) {
                 for (const el of Array.from(
-                    entry.doc.querySelectorAll('a,span,td,div')
+                    entry.doc.querySelectorAll('a,[onclick],span,td,div')
                 )) {
                     if (!visible(entry, el)) continue;
 
@@ -748,10 +749,21 @@ final class BrowserModel: ObservableObject {
                     const r = rectFor(entry, el);
                     const area = r.width * r.height;
 
+                    let quality = 0;
+                    if (el.tagName === 'A') quality += 100;
+                    if (el.closest('a')) quality += 50;
+                    if (el.hasAttribute('onclick')) quality += 25;
+                    if (r.width <= 420) quality += 10;
+
                     if (
                         projectMarker === null ||
-                        r.left < projectMarker.r.left - 8 ||
+                        quality > projectMarker.quality ||
                         (
+                            quality === projectMarker.quality &&
+                            r.left < projectMarker.r.left - 8
+                        ) ||
+                        (
+                            quality === projectMarker.quality &&
                             Math.abs(r.left - projectMarker.r.left) <= 8 &&
                             area < projectMarker.area
                         )
@@ -760,7 +772,8 @@ final class BrowserModel: ObservableObject {
                             entry,
                             el,
                             r,
-                            area
+                            area,
+                            quality
                         };
                     }
                 }
@@ -769,7 +782,7 @@ final class BrowserModel: ObservableObject {
             if (!projectMarker) {
                 return {
                     tasks: [],
-                    debug: 'tree:none treeRows:0 tasks:0'
+                    debug: 'tree:none container:none click:0 stop:END tasks:0'
                 };
             }
 
@@ -778,156 +791,211 @@ final class BrowserModel: ObservableObject {
             const projectY = projectMarker.r.cy;
 
             // ------------------------------------------------------------
-            // B. Get the ACTUAL immediate child task rows from the left tree.
-            //
-            // Prefer DOM row order (TR / role=row / LI). This is much more stable
-            // than guessing a Y cutoff from chart graphics.
+            // B. Find the smallest ancestor that behaves like the project tree.
+            // It must contain this project and preferably another known project.
             // ------------------------------------------------------------
-            function nearestRow(el) {
-                if (!el) return null;
-
-                return (
-                    el.closest('tr') ||
-                    el.closest('[role="row"]') ||
-                    el.closest('li')
-                );
-            }
-
-            const projectRow = nearestRow(projectMarker.el);
-            let rowList = [];
-
-            if (projectRow) {
-                if (projectRow.tagName === 'TR') {
-                    const table = projectRow.closest('table');
-                    if (table) {
-                        rowList = Array.from(table.querySelectorAll('tr'));
-                    }
-                } else if (projectRow.matches('[role="row"]')) {
-                    const owner =
-                        projectRow.closest('[role="treegrid"],[role="grid"],[role="table"]') ||
-                        projectRow.parentElement;
-
-                    if (owner) {
-                        rowList = Array.from(owner.querySelectorAll('[role="row"]'));
-                    }
-                } else if (projectRow.tagName === 'LI') {
-                    const owner = projectRow.parentElement;
-                    if (owner) {
-                        rowList = Array.from(owner.children).filter(
-                            el => el.tagName === 'LI'
-                        );
-                    }
-                }
-            }
-
-            function bestTaskNameInRow(row) {
-                const candidates = [];
+            function countKnownProjects(root) {
+                const found = new Set();
 
                 for (const el of Array.from(
-                    row.querySelectorAll('a,span,td,div')
+                    root.querySelectorAll('a,[onclick],span,td,div')
+                )) {
+                    if (!visible(entry, el)) continue;
+
+                    const name = cleanName(textOf(el));
+
+                    if (knownProjectNames.has(name)) {
+                        found.add(name);
+                    }
+                }
+
+                return found.size;
+            }
+
+            let treeContainer = null;
+            let ancestor = projectMarker.el;
+            let fallbackContainer = null;
+
+            for (let depth = 0; ancestor && depth < 14; depth++) {
+                const r = rectFor(entry, ancestor);
+
+                if (
+                    r.width >= 120 &&
+                    r.width <= 760 &&
+                    r.height >= 80
+                ) {
+                    fallbackContainer = ancestor;
+                }
+
+                const knownCount = countKnownProjects(ancestor);
+
+                if (
+                    knownCount >= 2 &&
+                    r.width >= 120 &&
+                    r.width <= 760
+                ) {
+                    treeContainer = ancestor;
+                    break;
+                }
+
+                ancestor = ancestor.parentElement;
+            }
+
+            if (!treeContainer) {
+                treeContainer =
+                    fallbackContainer ||
+                    projectMarker.el.parentElement ||
+                    entry.doc.body;
+            }
+
+            const containerRect = rectFor(entry, treeContainer);
+
+            // ------------------------------------------------------------
+            // C. Read the left tree in DOM ORDER.
+            //
+            // This is the key change from v2.1:
+            // Brabio does not use TR / role=row / LI here.
+            // The visible blue project/task names are still clickable DOM nodes,
+            // so use their actual document order instead of Y-range guessing.
+            // ------------------------------------------------------------
+            function makeClickableItems(selector) {
+                const out = [];
+
+                for (const el of Array.from(
+                    treeContainer.querySelectorAll(selector)
                 )) {
                     if (!visible(entry, el)) continue;
 
                     const r = rectFor(entry, el);
+
+                    // Stay inside the left project-tree pane.
+                    if (r.left < containerRect.left - 5) continue;
+                    if (r.right > containerRect.right + 5) continue;
+                    if (r.width < 8 || r.height < 8) continue;
+                    if (r.height > 55) continue;
+
                     const name = cleanName(textOf(el));
 
-                    if (r.left < projectX + 8 || r.left > projectX + 430) continue;
-                    if (r.height < 8 || r.height > 48) continue;
-                    if (isBadTaskName(name)) continue;
+                    if (!name || name.length > 100) continue;
 
+                    // Reject wrapper nodes that contain several meaningful child texts.
                     const childTexts = Array.from(el.children || [])
                         .filter(child => visible(entry, child))
                         .map(child => cleanName(textOf(child)))
-                        .filter(t => t && !isMetadata(t));
+                        .filter(t => t && t.length <= 100);
 
-                    const isContainer =
-                        Array.from(new Set(childTexts))
-                            .filter(t => t !== name)
-                            .length >= 2;
+                    const distinctChildren = Array.from(
+                        new Set(childTexts)
+                    ).filter(t => t !== name);
 
-                    if (isContainer) continue;
+                    if (distinctChildren.length >= 2) continue;
 
                     let score = 0;
                     if (el.tagName === 'A') score += 100;
                     if (el.closest('a')) score += 50;
                     if (el.hasAttribute('onclick')) score += 25;
-                    score += Math.min(40, Math.max(0, r.left - projectX) * 0.15);
-                    score -= (r.width * r.height) / 5000;
 
-                    candidates.push({
+                    out.push({
+                        el,
                         name,
                         r,
                         score
                     });
                 }
 
-                candidates.sort((a, b) => b.score - a.score);
-                return candidates[0] || null;
+                return out;
+            }
+
+            let clickableItems = makeClickableItems('a,[onclick]');
+
+            // Some Brabio rows put onclick on a parent and task text in a span.
+            // Add atomic text nodes only as a fallback.
+            if (
+                clickableItems.filter(item =>
+                    item.name === selectedProjectName ||
+                    !isBadTaskName(item.name)
+                ).length < 3
+            ) {
+                clickableItems = makeClickableItems(
+                    'a,[onclick],span,td,div'
+                );
+            }
+
+            // Find the selected-project item that best matches our project marker.
+            let selectedIndex = -1;
+            let bestSelectedScore = Number.NEGATIVE_INFINITY;
+
+            for (let i = 0; i < clickableItems.length; i++) {
+                const item = clickableItems[i];
+
+                if (item.name !== selectedProjectName) continue;
+
+                const distance =
+                    Math.abs(item.r.cy - projectY) +
+                    Math.abs(item.r.left - projectX) * 0.2;
+
+                const score = item.score - distance;
+
+                if (score > bestSelectedScore) {
+                    bestSelectedScore = score;
+                    selectedIndex = i;
+                }
             }
 
             const taskRows = [];
             let stopProjectName = '';
 
-            if (projectRow && rowList.length) {
-                const projectIndex = rowList.indexOf(projectRow);
+            if (selectedIndex >= 0) {
+                for (let i = selectedIndex + 1; i < clickableItems.length; i++) {
+                    const item = clickableItems[i];
+                    const name = item.name;
 
-                if (projectIndex >= 0) {
-                    for (let i = projectIndex + 1; i < rowList.length; i++) {
-                        const row = rowList[i];
-
-                        if (!visible(entry, row)) continue;
-
-                        const rowText = cleanName(textOf(row));
-
-                        // Hard stop at the first following known project heading.
-                        let foundProject = '';
-
-                        for (const projectName of knownProjectNames) {
-                            if (
-                                projectName !== selectedProjectName &&
-                                (
-                                    rowText === projectName ||
-                                    Array.from(row.querySelectorAll('a,span,td,div'))
-                                        .some(el =>
-                                            visible(entry, el) &&
-                                            cleanName(textOf(el)) === projectName
-                                        )
-                                )
-                            ) {
-                                foundProject = projectName;
-                                break;
-                            }
-                        }
-
-                        if (foundProject) {
-                            stopProjectName = foundProject;
-                            break;
-                        }
-
-                        const task = bestTaskNameInRow(row);
-
-                        if (!task) continue;
-
-                        // Use the real row center, not text element center, when possible.
-                        const rr = rectFor(entry, row);
-
-                        taskRows.push({
-                            name: task.name,
-                            y: rr.cy,
-                            r: task.r
-                        });
+                    // First following known project is the HARD stop.
+                    if (
+                        knownProjectNames.has(name) &&
+                        name !== selectedProjectName
+                    ) {
+                        stopProjectName = name;
+                        break;
                     }
+
+                    if (isBadTaskName(name)) continue;
+
+                    // Keep one task per visible row.
+                    const sameRow = taskRows.find(existing =>
+                        Math.abs(existing.y - item.r.cy) <= 7
+                    );
+
+                    if (sameRow) {
+                        if (item.score > sameRow.score) {
+                            sameRow.name = name;
+                            sameRow.r = item.r;
+                            sameRow.y = item.r.cy;
+                            sameRow.score = item.score;
+                        }
+
+                        continue;
+                    }
+
+                    taskRows.push({
+                        name,
+                        y: item.r.cy,
+                        r: item.r,
+                        score: item.score
+                    });
                 }
             }
 
-            // Fallback for old Brabio markup without semantic/table rows:
-            // use geometry, but ONLY between selected project and the next exact
-            // known project name.
+            // ------------------------------------------------------------
+            // D. Last-resort geometry fallback ONLY if DOM-order extraction
+            // produced nothing. The boundary is still the next exact known
+            // project name, never a guessed number of pixels.
+            // ------------------------------------------------------------
             if (taskRows.length === 0) {
                 let stopY = Number.POSITIVE_INFINITY;
 
                 for (const el of Array.from(
-                    entry.doc.querySelectorAll('a,span,td,div')
+                    treeContainer.querySelectorAll('a,[onclick],span,td,div')
                 )) {
                     if (!visible(entry, el)) continue;
 
@@ -937,7 +1005,6 @@ final class BrowserModel: ObservableObject {
                     if (r.cy <= projectY + 3) continue;
                     if (name === selectedProjectName) continue;
                     if (!knownProjectNames.has(name)) continue;
-                    if (r.left > projectX + 430) continue;
 
                     if (r.cy < stopY) {
                         stopY = r.cy;
@@ -948,7 +1015,7 @@ final class BrowserModel: ObservableObject {
                 const candidates = [];
 
                 for (const el of Array.from(
-                    entry.doc.querySelectorAll('a,span,td,div')
+                    treeContainer.querySelectorAll('a,[onclick],span,td,div')
                 )) {
                     if (!visible(entry, el)) continue;
 
@@ -956,15 +1023,26 @@ final class BrowserModel: ObservableObject {
                     const name = cleanName(textOf(el));
 
                     if (r.cy <= projectY + 4 || r.cy >= stopY - 2) continue;
-                    if (r.left < projectX + 8 || r.left > projectX + 430) continue;
-                    if (r.height < 8 || r.height > 48) continue;
+                    if (r.height < 8 || r.height > 55) continue;
                     if (isBadTaskName(name)) continue;
+
+                    const childTexts = Array.from(el.children || [])
+                        .filter(child => visible(entry, child))
+                        .map(child => cleanName(textOf(child)))
+                        .filter(t => t && !isMetadata(t));
+
+                    if (
+                        Array.from(new Set(childTexts))
+                            .filter(t => t !== name)
+                            .length >= 2
+                    ) {
+                        continue;
+                    }
 
                     let score = 0;
                     if (el.tagName === 'A') score += 100;
                     if (el.closest('a')) score += 50;
                     if (el.hasAttribute('onclick')) score += 25;
-                    score += Math.min(40, Math.max(0, r.left - projectX) * 0.15);
 
                     candidates.push({
                         name,
@@ -974,7 +1052,7 @@ final class BrowserModel: ObservableObject {
                 }
 
                 candidates.sort((a, b) => {
-                    if (Math.abs(a.r.cy - b.r.cy) > 6) {
+                    if (Math.abs(a.r.cy - b.r.cy) > 7) {
                         return a.r.cy - b.r.cy;
                     }
 
@@ -982,41 +1060,28 @@ final class BrowserModel: ObservableObject {
                 });
 
                 for (const item of candidates) {
-                    const sameRow = taskRows.find(
-                        x => Math.abs(x.y - item.r.cy) <= 7
-                    );
-
-                    if (sameRow) continue;
+                    if (
+                        taskRows.some(existing =>
+                            Math.abs(existing.y - item.r.cy) <= 7
+                        )
+                    ) {
+                        continue;
+                    }
 
                     taskRows.push({
                         name: item.name,
                         y: item.r.cy,
-                        r: item.r
+                        r: item.r,
+                        score: item.score
                     });
                 }
             }
 
-            // De-duplicate by row + name.
-            const cleanTaskRows = [];
-
-            for (const item of taskRows) {
-                if (
-                    cleanTaskRows.some(existing =>
-                        existing.name === item.name &&
-                        Math.abs(existing.y - item.y) <= 7
-                    )
-                ) {
-                    continue;
-                }
-
-                cleanTaskRows.push(item);
-            }
-
-            cleanTaskRows.sort((a, b) => a.y - b.y);
+            taskRows.sort((a, b) => a.y - b.y);
 
             // ------------------------------------------------------------
-            // C. Read progress / business days / dates / Gantt bars,
-            // but ONLY match them to the task rows found above.
+            // E. Read metadata and Gantt bars only to enrich confirmed tasks.
+            // They can NEVER create a task anymore.
             // ------------------------------------------------------------
             const evidence = [];
 
@@ -1254,7 +1319,7 @@ final class BrowserModel: ObservableObject {
 
             const results = [];
 
-            for (const task of cleanTaskRows) {
+            for (const task of taskRows) {
                 const y = task.y;
 
                 const rowEvidence = evidence.filter(
@@ -1267,7 +1332,6 @@ final class BrowserModel: ObservableObject {
                 const rowBars = bars
                     .filter(bar => Math.abs(bar.r.cy - y) <= 14)
                     .sort((a, b) => {
-                        // Prefer the bar whose printed text exactly matches this task.
                         const aMatch = a.name === task.name ? 1 : 0;
                         const bMatch = b.name === task.name ? 1 : 0;
 
@@ -1300,7 +1364,7 @@ final class BrowserModel: ObservableObject {
                     const r = rectFor(entry, el);
 
                     if (Math.abs(r.cy - y) > 12) continue;
-                    if (r.left <= projectX + 430) continue;
+                    if (r.left <= containerRect.right) continue;
 
                     const text = textOf(el);
                     const email = text.match(
@@ -1327,10 +1391,11 @@ final class BrowserModel: ObservableObject {
             return {
                 tasks: results.slice(0, 400),
                 debug:
-                    `tree:left ` +
-                    `treeRows:${rowList.length} ` +
+                    `tree:dom ` +
+                    `container:${treeContainer.tagName || 'NODE'} ` +
+                    `click:${clickableItems.length} ` +
                     `stop:${stopProjectName || 'END'} ` +
-                    `tasks:${cleanTaskRows.length} ` +
+                    `tasks:${taskRows.length} ` +
                     `bars:${bars.length} ` +
                     `dates:${compactAnchors.length}`
             };
