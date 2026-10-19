@@ -250,11 +250,13 @@ final class BrowserModel: ObservableObject {
         }
 
         let nameLiteral = jsonLiteral(project.name)
+        let allProjectNamesJSON = jsonArrayLiteral(projects.map(\.name))
         let attemptValue = attempt
 
         let js = """
         (function() {
             const targetName = \(nameLiteral);
+            const knownProjectNames = new Set(\(allProjectNamesJSON));
             const attempt = \(attemptValue);
 
             function collectDocs(root, offsetX = 0, offsetY = 0) {
@@ -316,26 +318,46 @@ final class BrowserModel: ObservableObject {
             const entries = collectDocs(document);
             let marker = null;
 
-            // Choose the LEFTMOST exact project-name match.
+            // Build exact left-side markers for every project in the native directory.
+            const markers = [];
+
             for (const entry of entries) {
                 for (const el of Array.from(
                     entry.doc.querySelectorAll('a,span,td,div')
                 )) {
                     if (!visible(entry, el)) continue;
-                    if (text(el) !== targetName) continue;
+
+                    const name = text(el);
+
+                    if (!knownProjectNames.has(name)) continue;
 
                     const r = rect(entry, el);
                     const area = r.width * r.height;
 
-                    if (
-                        marker === null ||
-                        r.left < marker.r.left - 8 ||
-                        (
-                            Math.abs(r.left - marker.r.left) <= 8 &&
-                            area < marker.area
-                        )
-                    ) {
-                        marker = { entry, el, r, area };
+                    markers.push({
+                        name,
+                        entry,
+                        el,
+                        r,
+                        area
+                    });
+
+                    if (name === targetName) {
+                        if (
+                            marker === null ||
+                            r.left < marker.r.left - 8 ||
+                            (
+                                Math.abs(r.left - marker.r.left) <= 8 &&
+                                area < marker.area
+                            )
+                        ) {
+                            marker = {
+                                entry,
+                                el,
+                                r,
+                                area
+                            };
+                        }
                     }
                 }
             }
@@ -344,7 +366,8 @@ final class BrowserModel: ObservableObject {
                 return {
                     status: 'project-not-found',
                     expanded: false,
-                    children: 0
+                    children: 0,
+                    collapsedOthers: 0
                 };
             }
 
@@ -352,43 +375,110 @@ final class BrowserModel: ObservableObject {
             const projectX = marker.r.left;
             const projectY = marker.r.cy;
 
-            // Find the next sibling project row.
-            let stopY = Number.POSITIVE_INFINITY;
+            // Deduplicate project markers by exact name, preferring the leftmost/smallest.
+            const bestByName = new Map();
 
-            for (const el of Array.from(
-                entry.doc.querySelectorAll('a,span,td,div')
-            )) {
-                if (!visible(entry, el)) continue;
-
-                const r = rect(entry, el);
-                const name = text(el);
-
-                if (r.cy <= projectY + 3) continue;
-                if (r.left > projectX + 30) continue;
+            for (const item of markers) {
+                const prev = bestByName.get(item.name);
 
                 if (
-                    /(事業|專案|项目|プロジェクト|請假|休暇)$/i.test(name) &&
-                    name !== targetName
+                    !prev ||
+                    item.r.left < prev.r.left - 8 ||
+                    (
+                        Math.abs(item.r.left - prev.r.left) <= 8 &&
+                        item.area < prev.area
+                    )
                 ) {
-                    stopY = Math.min(stopY, r.cy);
+                    bestByName.set(item.name, item);
                 }
             }
 
-            function countVisibleChildren() {
+            const projectRows = Array.from(bestByName.values())
+                .filter(item => item.entry.doc === entry.doc)
+                .sort((a, b) => a.r.cy - b.r.cy);
+
+            function findTreeToggle(projectItem) {
+                const px = projectItem.r.left;
+                const py = projectItem.r.cy;
+                const possible = [];
+
+                for (const el of Array.from(
+                    projectItem.entry.doc.querySelectorAll(
+                        'img,a,button,input,span,div'
+                    )
+                )) {
+                    if (!visible(projectItem.entry, el)) continue;
+
+                    const r = rect(projectItem.entry, el);
+
+                    if (Math.abs(r.cy - py) > 16) continue;
+                    if (r.right > px + 10) continue;
+                    if (r.left < px - 120) continue;
+                    if (r.width < 6 || r.width > 42) continue;
+                    if (r.height < 6 || r.height > 42) continue;
+
+                    const blob = [
+                        text(el),
+                        el.id || '',
+                        typeof el.className === 'string' ? el.className : '',
+                        el.getAttribute('title') || '',
+                        el.getAttribute('alt') || '',
+                        el.getAttribute('src') || '',
+                        el.getAttribute('name') || ''
+                    ].join(' ').toLowerCase();
+
+                    let score = 0;
+
+                    if (/(minus|collapse|opened|tree.*minus)/i.test(blob)) {
+                        score += 130;
+                    }
+
+                    if (/(plus|expand|closed|tree.*plus)/i.test(blob)) {
+                        score += 100;
+                    }
+
+                    if (el.tagName === 'IMG') score += 20;
+                    if (el.closest('a,button,[onclick]')) score += 15;
+
+                    score -= Math.abs(px - r.right) * 0.2;
+
+                    possible.push({
+                        el,
+                        r,
+                        score,
+                        blob,
+                        isMinus: /(minus|collapse|opened|tree.*minus)/i.test(blob),
+                        isPlus: /(plus|expand|closed|tree.*plus)/i.test(blob)
+                    });
+                }
+
+                possible.sort((a, b) => b.score - a.score);
+
+                return possible[0] || null;
+            }
+
+            function nextProjectY(item) {
+                const next = projectRows.find(row => row.r.cy > item.r.cy + 3);
+                return next ? next.r.cy : Number.POSITIVE_INFINITY;
+            }
+
+            function visibleChildCount(item) {
+                const stop = nextProjectY(item);
                 let count = 0;
 
                 for (const el of Array.from(
-                    entry.doc.querySelectorAll('a,span,td,div')
+                    item.entry.doc.querySelectorAll('a,span,td,div')
                 )) {
-                    if (!visible(entry, el)) continue;
+                    if (!visible(item.entry, el)) continue;
 
-                    const r = rect(entry, el);
+                    const r = rect(item.entry, el);
                     const t = text(el);
 
-                    if (r.cy <= projectY + 4 || r.cy >= stopY - 2) continue;
-                    if (r.left < projectX + 10 || r.left > projectX + 430) continue;
+                    if (r.cy <= item.r.cy + 4 || r.cy >= stop - 2) continue;
+                    if (r.left < item.r.left + 10 || r.left > item.r.left + 430) continue;
                     if (r.height < 8 || r.height > 50) continue;
                     if (!t || t.length < 2 || t.length > 100) continue;
+                    if (knownProjectNames.has(t)) continue;
 
                     if (
                         /^\\d+\\s*営業日$/i.test(t) ||
@@ -404,73 +494,58 @@ final class BrowserModel: ObservableObject {
                 return count;
             }
 
-            let childrenBefore = countVisibleChildren();
-            let expanded = childrenBefore > 0;
+            // First collapse every OTHER expanded project.
+            // This prevents any other project's child rows from existing in the DOM
+            // while we scrape the selected one.
+            let collapsedOthers = 0;
 
-            // If collapsed, find the small [+] / expand control immediately to
-            // the LEFT of the project name and click it.
-            if (!expanded) {
-                const possible = [];
+            for (const item of projectRows) {
+                if (item.name === targetName) continue;
 
-                for (const el of Array.from(
-                    entry.doc.querySelectorAll('img,a,button,input,span,div')
-                )) {
-                    if (!visible(entry, el)) continue;
+                const count = visibleChildCount(item);
+                if (count <= 0) continue;
 
-                    const r = rect(entry, el);
+                const toggle = findTreeToggle(item);
 
-                    if (Math.abs(r.cy - projectY) > 16) continue;
-                    if (r.right > projectX + 8) continue;
-                    if (r.left < projectX - 100) continue;
-                    if (r.width < 6 || r.width > 40) continue;
-                    if (r.height < 6 || r.height > 40) continue;
-
-                    const blob = [
-                        text(el),
-                        el.id || '',
-                        typeof el.className === 'string' ? el.className : '',
-                        el.getAttribute('title') || '',
-                        el.getAttribute('alt') || '',
-                        el.getAttribute('src') || '',
-                        el.getAttribute('name') || ''
-                    ].join(' ').toLowerCase();
-
-                    let score = 0;
-
-                    if (/(plus|expand|open|closed|tree.*plus|\\+)/i.test(blob)) {
-                        score += 100;
-                    }
-
-                    if (/(minus|collapse|opened|tree.*minus)/i.test(blob)) {
-                        score -= 100;
-                    }
-
-                    if (el.tagName === 'IMG') score += 20;
-                    if (el.closest('a,button,[onclick]')) score += 15;
-
-                    // The closest small control to the project name is likely the +/-.
-                    score -= Math.abs(projectX - r.right) * 0.2;
-
-                    possible.push({ el, r, score, blob });
-                }
-
-                possible.sort((a, b) => b.score - a.score);
-
-                const expander = possible.find(x => x.score > 5);
-
-                if (expander) {
+                if (toggle && toggle.isMinus) {
                     const clickable =
-                        expander.el.closest('a,button,[onclick]') ||
-                        expander.el;
+                        toggle.el.closest('a,button,[onclick]') ||
+                        toggle.el;
 
-                    clickable.click();
-                    expanded = true;
+                    try {
+                        clickable.click();
+                        collapsedOthers += 1;
+                    } catch (_) {}
                 }
             }
 
-            // On the first attempt also activate/select the project row itself.
-            // This handles Brabio projects where the folder expansion and the
-            // project selection are two separate actions.
+            const targetItem = bestByName.get(targetName) || {
+                name: targetName,
+                entry,
+                el: marker.el,
+                r: marker.r
+            };
+
+            let childrenBefore = visibleChildCount(targetItem);
+            let expanded = childrenBefore > 0;
+
+            // Expand ONLY the target project.
+            if (!expanded) {
+                const toggle = findTreeToggle(targetItem);
+
+                if (toggle) {
+                    const clickable =
+                        toggle.el.closest('a,button,[onclick]') ||
+                        toggle.el;
+
+                    try {
+                        clickable.click();
+                        expanded = true;
+                    } catch (_) {}
+                }
+            }
+
+            // Also activate/select the project row itself.
             if (attempt === 0) {
                 const directLink =
                     marker.el.closest('a,button,[onclick]') ||
@@ -486,7 +561,8 @@ final class BrowserModel: ObservableObject {
             return {
                 status: expanded ? 'expanded-or-selected' : 'selected',
                 expanded,
-                children: countVisibleChildren()
+                children: visibleChildCount(targetItem),
+                collapsedOthers
             };
         })();
         """
@@ -856,6 +932,36 @@ final class BrowserModel: ObservableObject {
                     stopProjectName = name;
                 }
             }
+
+            // Secondary HARD boundary: the next folder/project icon row.
+            // Even if the next project's text node is nested differently, Brabio still
+            // renders a folder icon at the start of every project row.
+            let nextFolderY = Number.POSITIVE_INFINITY;
+
+            for (const el of Array.from(
+                entry.doc.querySelectorAll('img')
+            )) {
+                if (!visible(entry, el)) continue;
+
+                const r = rectFor(entry, el);
+
+                if (r.cy <= projectY + 3) continue;
+                if (r.left > projectX + 80) continue;
+
+                const blob = [
+                    el.getAttribute('src') || '',
+                    el.getAttribute('alt') || '',
+                    el.getAttribute('title') || '',
+                    el.id || '',
+                    typeof el.className === 'string' ? el.className : ''
+                ].join(' ').toLowerCase();
+
+                if (!/(folder|project|dir)/i.test(blob)) continue;
+
+                nextFolderY = Math.min(nextFolderY, r.cy);
+            }
+
+            stopY = Math.min(stopY, nextFolderY);
 
             const treeRight = projectX + 430;
 
@@ -1315,6 +1421,7 @@ final class BrowserModel: ObservableObject {
                 debug:
                     `tree:left ` +
                     `stop:${stopProjectName || 'END'} ` +
+                    `folderStop:${Number.isFinite(nextFolderY) ? Math.round(nextFolderY) : 'END'} ` +
                     `evidence:${evidence.length} ` +
                     `rows:${clusteredRows.length} ` +
                     `bars:${bars.length} ` +
