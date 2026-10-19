@@ -23,6 +23,19 @@ struct GanttTask: Identifiable, Hashable {
     }
 }
 
+struct TaskDetail: Equatable {
+    let title: String
+    let period: String
+    let progress: Int
+    let progressOptions: [Int]
+    let status: String
+    let lastUpdated: String
+    let registeredBy: String
+    let updatedBy: String
+    let content: String
+    let members: [String]
+}
+
 enum WorkspaceTab: String, CaseIterable, Identifiable {
     case gantt = "甘特圖"
     case schedule = "日程"

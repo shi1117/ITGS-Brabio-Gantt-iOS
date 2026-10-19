@@ -17,6 +17,11 @@ final class BrowserModel: ObservableObject {
     @Published var syncState: SyncState = .idle
     @Published var diagnosticText: String = ""
 
+    @Published var activeTaskDetail: TaskDetail?
+    @Published var taskDetailLoading = false
+    @Published var taskProgressSaving = false
+    @Published var taskDetailMessage: String?
+
     weak var webView: WKWebView?
 
     private struct PendingLogin {
@@ -1493,6 +1498,730 @@ final class BrowserModel: ObservableObject {
                 } else {
                     self.syncState = .ready
                 }
+            }
+        }
+    }
+
+
+    func openTaskDetail(_ task: GanttTask) {
+        guard let webView else {
+            taskDetailMessage = "Brabio 尚未連線"
+            return
+        }
+
+        activeTaskDetail = nil
+        taskDetailLoading = true
+        taskProgressSaving = false
+        taskDetailMessage = nil
+
+        let taskNameJSON = jsonLiteral(task.name)
+        let projectNameJSON = jsonLiteral(selectedProject?.name ?? "")
+        let allProjectsJSON = jsonArrayLiteral(projects.map(\.name))
+
+        let js = """
+        (function() {
+            const taskName = \(taskNameJSON);
+            const projectName = \(projectNameJSON);
+            const projectNames = new Set(\(allProjectsJSON));
+
+            function docs(root, offsetX = 0, offsetY = 0) {
+                const out = [{ doc: root, offsetX, offsetY }];
+
+                for (const frame of Array.from(root.querySelectorAll('iframe,frame'))) {
+                    try {
+                        if (!frame.contentDocument) continue;
+                        const r = frame.getBoundingClientRect();
+                        out.push(
+                            ...docs(
+                                frame.contentDocument,
+                                offsetX + r.left,
+                                offsetY + r.top
+                            )
+                        );
+                    } catch (_) {}
+                }
+
+                return out;
+            }
+
+            function visible(entry, el) {
+                if (!el) return false;
+
+                const w = entry.doc.defaultView || window;
+                const s = w.getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+
+                return r.width > 0 &&
+                       r.height > 0 &&
+                       s.display !== 'none' &&
+                       s.visibility !== 'hidden';
+            }
+
+            function rect(entry, el) {
+                const r = el.getBoundingClientRect();
+
+                return {
+                    left: r.left + entry.offsetX,
+                    right: r.right + entry.offsetX,
+                    top: r.top + entry.offsetY,
+                    bottom: r.bottom + entry.offsetY,
+                    width: r.width,
+                    height: r.height,
+                    cx: r.left + entry.offsetX + r.width / 2,
+                    cy: r.top + entry.offsetY + r.height / 2
+                };
+            }
+
+            function text(el) {
+                return (el.innerText || el.textContent || '')
+                    .replace(/\\s+/g, ' ')
+                    .trim();
+            }
+
+            const entries = docs(document);
+
+            for (const entry of entries) {
+                const projectHits = Array.from(
+                    entry.doc.querySelectorAll('a,[onclick],span,td,div')
+                )
+                .filter(el =>
+                    visible(entry, el) &&
+                    text(el) === projectName
+                )
+                .map(el => ({
+                    el,
+                    r: rect(entry, el),
+                    area: rect(entry, el).width * rect(entry, el).height
+                }))
+                .sort((a, b) => {
+                    if (Math.abs(a.r.left - b.r.left) > 8) {
+                        return a.r.left - b.r.left;
+                    }
+
+                    return a.area - b.area;
+                });
+
+                if (!projectHits.length) continue;
+
+                const project = projectHits[0];
+                let stopY = Number.POSITIVE_INFINITY;
+
+                for (const el of Array.from(
+                    entry.doc.querySelectorAll('a,[onclick],span,td,div')
+                )) {
+                    if (!visible(entry, el)) continue;
+
+                    const name = text(el);
+                    if (!projectNames.has(name) || name === projectName) continue;
+
+                    const r = rect(entry, el);
+
+                    if (r.cy > project.r.cy + 3) {
+                        stopY = Math.min(stopY, r.cy);
+                    }
+                }
+
+                const candidates = [];
+
+                for (const el of Array.from(
+                    entry.doc.querySelectorAll('a,[onclick],span,td,div')
+                )) {
+                    if (!visible(entry, el)) continue;
+                    if (text(el) !== taskName) continue;
+
+                    const r = rect(entry, el);
+
+                    if (r.cy <= project.r.cy + 3) continue;
+                    if (r.cy >= stopY - 2) continue;
+                    if (r.left < project.r.left + 5) continue;
+                    if (r.left > project.r.left + 500) continue;
+
+                    let quality = 0;
+                    if (el.tagName === 'A') quality += 100;
+                    if (el.closest('a')) quality += 50;
+                    if (el.hasAttribute('onclick')) quality += 25;
+
+                    candidates.push({
+                        el,
+                        r,
+                        quality,
+                        area: r.width * r.height
+                    });
+                }
+
+                candidates.sort((a, b) => {
+                    if (a.quality !== b.quality) {
+                        return b.quality - a.quality;
+                    }
+
+                    return a.area - b.area;
+                });
+
+                const match = candidates[0];
+
+                if (!match) continue;
+
+                const clickable =
+                    match.el.closest('a,[onclick],button') ||
+                    match.el;
+
+                try {
+                    clickable.click();
+                    return 'clicked';
+                } catch (_) {
+                    return 'click-failed';
+                }
+            }
+
+            return 'task-not-found';
+        })();
+        """
+
+        webView.evaluateJavaScript(js) { [weak self] result, error in
+            Task { @MainActor in
+                guard let self else { return }
+
+                if let error {
+                    self.taskDetailLoading = false
+                    self.taskDetailMessage =
+                        "開啟任務失敗：\(error.localizedDescription)"
+                    return
+                }
+
+                let status = result as? String ?? "unknown"
+
+                guard status == "clicked" else {
+                    self.taskDetailLoading = false
+                    self.taskDetailMessage =
+                        status == "task-not-found"
+                        ? "找不到這個 Brabio 任務"
+                        : "無法開啟任務"
+                    return
+                }
+
+                try? await Task.sleep(nanoseconds: 750_000_000)
+                self.readTaskDetail(task)
+            }
+        }
+    }
+
+    func reloadTaskDetail(_ task: GanttTask) {
+        taskDetailLoading = true
+        taskDetailMessage = nil
+        readTaskDetail(task)
+    }
+
+    func closeTaskDetail() {
+        activeTaskDetail = nil
+        taskDetailLoading = false
+        taskProgressSaving = false
+        taskDetailMessage = nil
+    }
+
+    func updateTaskProgress(_ task: GanttTask, progress: Int) {
+        guard let webView else {
+            taskDetailMessage = "Brabio 尚未連線"
+            return
+        }
+
+        taskProgressSaving = true
+        taskDetailMessage = nil
+
+        let target = min(max(progress, 0), 100)
+
+        let js = """
+        (function() {
+            function docs(root) {
+                const out = [root];
+
+                for (const frame of Array.from(root.querySelectorAll('iframe,frame'))) {
+                    try {
+                        if (frame.contentDocument) {
+                            out.push(...docs(frame.contentDocument));
+                        }
+                    } catch (_) {}
+                }
+
+                return out;
+            }
+
+            function visible(d, el) {
+                if (!el) return false;
+
+                const w = d.defaultView || window;
+                const s = w.getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+
+                return r.width > 0 &&
+                       r.height > 0 &&
+                       s.display !== 'none' &&
+                       s.visibility !== 'hidden' &&
+                       !el.disabled;
+            }
+
+            for (const d of docs(document)) {
+                const selects = Array.from(
+                    d.querySelectorAll('select')
+                ).filter(el => visible(d, el));
+
+                let progressSelect = null;
+                let targetOption = null;
+
+                for (const select of selects) {
+                    const options = Array.from(select.options || []);
+                    const percentOptions = options.filter(option =>
+                        /^\\s*\\d{1,3}\\s*%\\s*$/.test(
+                            option.textContent || ''
+                        )
+                    );
+
+                    if (percentOptions.length < 2) continue;
+
+                    const exact = percentOptions.find(option => {
+                        const m = (option.textContent || '')
+                            .match(/(\\d{1,3})\\s*%/);
+
+                        return m && Number(m[1]) === \(target);
+                    });
+
+                    if (!exact) continue;
+
+                    progressSelect = select;
+                    targetOption = exact;
+                    break;
+                }
+
+                if (!progressSelect || !targetOption) continue;
+
+                const oldValue = progressSelect.value;
+                const newValue = targetOption.value;
+
+                try {
+                    const setter = Object
+                        .getOwnPropertyDescriptor(
+                            d.defaultView.HTMLSelectElement.prototype,
+                            'value'
+                        )?.set;
+
+                    if (setter) {
+                        setter.call(progressSelect, newValue);
+                    } else {
+                        progressSelect.value = newValue;
+                    }
+                } catch (_) {
+                    progressSelect.value = newValue;
+                }
+
+                progressSelect.dispatchEvent(
+                    new Event('input', { bubbles: true })
+                );
+
+                progressSelect.dispatchEvent(
+                    new Event('change', { bubbles: true })
+                );
+
+                try {
+                    progressSelect.blur();
+                } catch (_) {}
+
+                return {
+                    status: 'changed',
+                    oldValue,
+                    newValue,
+                    progress: \(target)
+                };
+            }
+
+            return {
+                status: 'progress-select-not-found'
+            };
+        })();
+        """
+
+        webView.evaluateJavaScript(js) { [weak self] result, error in
+            Task { @MainActor in
+                guard let self else { return }
+
+                if let error {
+                    self.taskProgressSaving = false
+                    self.taskDetailMessage =
+                        "更新失敗：\(error.localizedDescription)"
+                    return
+                }
+
+                let object = result as? [String: Any]
+                let status = object?["status"] as? String ?? "unknown"
+
+                guard status == "changed" else {
+                    self.taskProgressSaving = false
+                    self.taskDetailMessage =
+                        "找不到 Brabio 的進度選單，尚未更新"
+                    return
+                }
+
+                if let index = self.tasks.firstIndex(where: { $0.id == task.id }) {
+                    let old = self.tasks[index]
+
+                    self.tasks[index] = GanttTask(
+                        id: old.id,
+                        name: old.name,
+                        start: old.start,
+                        end: old.end,
+                        progress: target,
+                        assignee: old.assignee
+                    )
+                }
+
+                self.taskDetailMessage = "已送出 \(target)% 到 Brabio"
+
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+
+                self.taskProgressSaving = false
+                self.readTaskDetail(
+                    GanttTask(
+                        id: task.id,
+                        name: task.name,
+                        start: task.start,
+                        end: task.end,
+                        progress: target,
+                        assignee: task.assignee
+                    )
+                )
+            }
+        }
+    }
+
+    private func readTaskDetail(_ task: GanttTask) {
+        guard let webView else {
+            taskDetailLoading = false
+            return
+        }
+
+        let taskNameJSON = jsonLiteral(task.name)
+
+        let js = """
+        (function() {
+            const taskName = \(taskNameJSON);
+
+            function docs(root, offsetX = 0, offsetY = 0) {
+                const out = [{ doc: root, offsetX, offsetY }];
+
+                for (const frame of Array.from(root.querySelectorAll('iframe,frame'))) {
+                    try {
+                        if (!frame.contentDocument) continue;
+
+                        const r = frame.getBoundingClientRect();
+
+                        out.push(
+                            ...docs(
+                                frame.contentDocument,
+                                offsetX + r.left,
+                                offsetY + r.top
+                            )
+                        );
+                    } catch (_) {}
+                }
+
+                return out;
+            }
+
+            function visible(entry, el) {
+                if (!el) return false;
+
+                const w = entry.doc.defaultView || window;
+                const s = w.getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+
+                return r.width > 0 &&
+                       r.height > 0 &&
+                       s.display !== 'none' &&
+                       s.visibility !== 'hidden';
+            }
+
+            function rect(entry, el) {
+                const r = el.getBoundingClientRect();
+
+                return {
+                    left: r.left + entry.offsetX,
+                    right: r.right + entry.offsetX,
+                    top: r.top + entry.offsetY,
+                    bottom: r.bottom + entry.offsetY,
+                    width: r.width,
+                    height: r.height,
+                    cx: r.left + entry.offsetX + r.width / 2,
+                    cy: r.top + entry.offsetY + r.height / 2
+                };
+            }
+
+            function clean(value) {
+                return String(value || '')
+                    .replace(/\\s+/g, ' ')
+                    .trim();
+            }
+
+            const entries = docs(document);
+            let best = null;
+
+            for (const entry of entries) {
+                for (const el of Array.from(
+                    entry.doc.querySelectorAll(
+                        'h1,h2,h3,strong,a,span,div,td'
+                    )
+                )) {
+                    if (!visible(entry, el)) continue;
+
+                    const text = clean(el.innerText || el.textContent);
+
+                    if (text !== taskName) continue;
+
+                    const r = rect(entry, el);
+                    let score = r.left;
+
+                    if (/^H[1-3]$/.test(el.tagName)) score += 1000;
+                    if (r.width > 100) score += 100;
+
+                    if (!best || score > best.score) {
+                        best = {
+                            entry,
+                            el,
+                            r,
+                            score
+                        };
+                    }
+                }
+            }
+
+            if (!best) {
+                return {
+                    status: 'detail-not-found'
+                };
+            }
+
+            const entry = best.entry;
+            const d = entry.doc;
+            const titleLeft = best.r.left;
+
+            const visibleNodes = Array.from(
+                d.querySelectorAll('div,span,td,p,a,label')
+            )
+            .filter(el => visible(entry, el))
+            .map(el => ({
+                el,
+                text: clean(el.innerText || el.textContent),
+                r: rect(entry, el)
+            }))
+            .filter(item =>
+                item.r.left >= titleLeft - 40
+            );
+
+            function shortestMatching(regex, maxLength = 180) {
+                return visibleNodes
+                    .filter(item =>
+                        item.text.length > 0 &&
+                        item.text.length <= maxLength &&
+                        regex.test(item.text)
+                    )
+                    .sort((a, b) => a.text.length - b.text.length)[0]?.text || '';
+            }
+
+            const period = shortestMatching(
+                /\\d{1,2}\\/\\d{1,2}.*～.*\\d{1,2}\\/\\d{1,2}/,
+                180
+            );
+
+            const lastUpdated = shortestMatching(
+                /最終更新/,
+                180
+            );
+
+            const registeredBy = shortestMatching(
+                /^登録\\s+/,
+                160
+            );
+
+            const updatedBy = shortestMatching(
+                /^更新\\s+/,
+                160
+            );
+
+            const selects = Array.from(
+                d.querySelectorAll('select')
+            ).filter(el => visible(entry, el));
+
+            let progress = \(task.progress);
+            let progressOptions = [];
+            let statusText = '';
+
+            for (const select of selects) {
+                const options = Array.from(select.options || []);
+                const percentOptions = options
+                    .map(option => {
+                        const text = clean(option.textContent);
+                        const m = text.match(/^(\\d{1,3})\\s*%$/);
+                        return m ? Number(m[1]) : null;
+                    })
+                    .filter(value =>
+                        value !== null &&
+                        value >= 0 &&
+                        value <= 100
+                    );
+
+                if (percentOptions.length >= 2) {
+                    progressOptions = Array.from(
+                        new Set(percentOptions)
+                    ).sort((a, b) => a - b);
+
+                    const selected = clean(
+                        select.selectedOptions?.[0]?.textContent ||
+                        select.options?.[select.selectedIndex]?.textContent ||
+                        ''
+                    );
+
+                    const m = selected.match(/(\\d{1,3})\\s*%/);
+
+                    if (m) {
+                        progress = Math.max(
+                            0,
+                            Math.min(100, Number(m[1]))
+                        );
+                    }
+
+                    continue;
+                }
+
+                if (!statusText) {
+                    const selected = clean(
+                        select.selectedOptions?.[0]?.textContent ||
+                        select.options?.[select.selectedIndex]?.textContent ||
+                        ''
+                    );
+
+                    if (
+                        selected &&
+                        !/^\\d{1,3}\\s*%$/.test(selected)
+                    ) {
+                        statusText = selected;
+                    }
+                }
+            }
+
+            let members = [];
+
+            const memberHeading = visibleNodes.find(item =>
+                /^メンバー(?:\\s|$)/.test(item.text)
+            );
+
+            if (memberHeading) {
+                let root = memberHeading.el.parentElement;
+
+                for (let i = 0; root && i < 3; i++) {
+                    const names = Array.from(
+                        root.querySelectorAll('a,span')
+                    )
+                    .filter(el => visible(entry, el))
+                    .map(el => clean(el.innerText || el.textContent))
+                    .filter(text =>
+                        text &&
+                        text.length <= 40 &&
+                        text !== '変更する' &&
+                        !/^メンバー/.test(text) &&
+                        !/^\\d+$/.test(text)
+                    );
+
+                    if (names.length) {
+                        members = Array.from(new Set(names));
+                        break;
+                    }
+
+                    root = root.parentElement;
+                }
+            }
+
+            let content = '';
+
+            const contentCandidates = Array.from(
+                d.querySelectorAll('div,td,p')
+            )
+            .filter(el => visible(entry, el))
+            .map(el => ({
+                text: clean(el.innerText || el.textContent),
+                r: rect(entry, el)
+            }))
+            .filter(item =>
+                item.r.left >= titleLeft - 20 &&
+                item.r.width >= 180 &&
+                item.r.height >= 24 &&
+                item.r.height <= 220 &&
+                item.text.length >= 6 &&
+                item.text.length <= 900 &&
+                item.text !== taskName &&
+                !/^(期間|進捗|登録|更新|最終更新|メンバー)/.test(item.text) &&
+                !/コメントはありません/.test(item.text) &&
+                !/コピーする.*変更する.*削除する/.test(item.text)
+            )
+            .sort((a, b) => b.text.length - a.text.length);
+
+            if (contentCandidates.length) {
+                content = contentCandidates[0].text;
+            }
+
+            return {
+                status: 'ok',
+                title: taskName,
+                period,
+                progress,
+                progressOptions,
+                taskStatus: statusText,
+                lastUpdated,
+                registeredBy,
+                updatedBy,
+                content,
+                members
+            };
+        })();
+        """
+
+        webView.evaluateJavaScript(js) { [weak self] result, error in
+            Task { @MainActor in
+                guard let self else { return }
+
+                self.taskDetailLoading = false
+
+                if let error {
+                    self.taskDetailMessage =
+                        "讀取任務內容失敗：\(error.localizedDescription)"
+                    return
+                }
+
+                guard
+                    let object = result as? [String: Any],
+                    (object["status"] as? String) == "ok"
+                else {
+                    self.taskDetailMessage = "尚未讀到 Brabio 任務內容"
+                    return
+                }
+
+                let options = (
+                    object["progressOptions"] as? [NSNumber]
+                )?.map(\.intValue) ?? []
+
+                let members =
+                    object["members"] as? [String] ?? []
+
+                self.activeTaskDetail = TaskDetail(
+                    title: object["title"] as? String ?? task.name,
+                    period: object["period"] as? String ?? "",
+                    progress:
+                        (object["progress"] as? NSNumber)?.intValue
+                        ?? task.progress,
+                    progressOptions: options,
+                    status: object["taskStatus"] as? String ?? "",
+                    lastUpdated: object["lastUpdated"] as? String ?? "",
+                    registeredBy: object["registeredBy"] as? String ?? "",
+                    updatedBy: object["updatedBy"] as? String ?? "",
+                    content: object["content"] as? String ?? "",
+                    members: members
+                )
             }
         }
     }

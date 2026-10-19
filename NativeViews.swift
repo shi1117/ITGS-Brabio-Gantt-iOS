@@ -105,6 +105,7 @@ struct ProjectWorkspaceView: View {
     @ObservedObject var model: BrowserModel
     @Environment(\.dismiss) private var dismiss
     @State private var tab: WorkspaceTab = .gantt
+    @State private var selectedTask: GanttTask?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -114,15 +115,25 @@ struct ProjectWorkspaceView: View {
             Group {
                 switch tab {
                 case .gantt:
-                    NativeGanttView(tasks: model.tasks)
+                    NativeGanttView(
+                        tasks: model.tasks,
+                        onTaskTap: openTask
+                    )
                 case .schedule:
-                    NativeScheduleView(tasks: model.tasks)
+                    NativeScheduleView(
+                        tasks: model.tasks,
+                        onTaskTap: openTask
+                    )
                 case .assignee:
-                    NativeAssigneeView(tasks: model.tasks)
+                    NativeAssigneeView(
+                        tasks: model.tasks,
+                        onTaskTap: openTask
+                    )
                 case .overview:
                     NativeOverviewView(
                         tasks: model.tasks,
-                        projectName: model.selectedProject?.name ?? "專案"
+                        projectName: model.selectedProject?.name ?? "專案",
+                        onTaskTap: openTask
                     )
                 }
             }
@@ -133,6 +144,19 @@ struct ProjectWorkspaceView: View {
         }
         .background(Color(uiColor: .systemGroupedBackground))
         .toolbar(.hidden, for: .navigationBar)
+        .sheet(item: $selectedTask, onDismiss: {
+            model.closeTaskDetail()
+        }) { task in
+            NativeTaskDetailView(
+                model: model,
+                task: task
+            )
+        }
+    }
+
+    private func openTask(_ task: GanttTask) {
+        selectedTask = task
+        model.openTaskDetail(task)
     }
 
     private var workspaceHeader: some View {
@@ -202,6 +226,7 @@ struct ProjectWorkspaceView: View {
 
 struct NativeGanttView: View {
     let tasks: [GanttTask]
+    let onTaskTap: (GanttTask) -> Void
 
     private let rowHeight: CGFloat = 52
     private let dayWidth: CGFloat = 34
@@ -265,22 +290,36 @@ struct NativeGanttView: View {
                 .background(Color(uiColor: .secondarySystemBackground))
 
             ForEach(tasks) { task in
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(task.name)
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.black)
-                        .lineLimit(2)
+                Button {
+                    onTaskTap(task)
+                } label: {
+                    HStack(spacing: 6) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(task.name)
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(.black)
+                                .lineLimit(2)
 
-                    Text("\(task.progress)%")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                            Text("\(task.progress)%")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Spacer(minLength: 0)
+
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                    .frame(width: labelWidth, height: rowHeight, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .background(Color(uiColor: .systemBackground))
+                    .contentShape(Rectangle())
+                    .overlay(alignment: .bottom) {
+                        Divider()
+                    }
                 }
-                .frame(width: labelWidth, height: rowHeight, alignment: .leading)
-                .padding(.horizontal, 10)
-                .background(Color(uiColor: .systemBackground))
-                .overlay(alignment: .bottom) {
-                    Divider()
-                }
+                .buttonStyle(.plain)
             }
         }
     }
@@ -399,6 +438,7 @@ private struct TimelineTaskRow: View {
 
 struct NativeScheduleView: View {
     let tasks: [GanttTask]
+    let onTaskTap: (GanttTask) -> Void
     @State private var selectedDate = Date()
 
     private var tasksForDay: [GanttTask] {
@@ -437,7 +477,12 @@ struct NativeScheduleView: View {
                             .padding(.vertical, 28)
                     } else {
                         ForEach(tasksForDay) { task in
-                            NativeTaskCard(task: task)
+                            Button {
+                                onTaskTap(task)
+                            } label: {
+                                NativeTaskCard(task: task)
+                            }
+                            .buttonStyle(.plain)
                         }
                     }
                 }
@@ -452,6 +497,7 @@ struct NativeScheduleView: View {
 
 struct NativeAssigneeView: View {
     let tasks: [GanttTask]
+    let onTaskTap: (GanttTask) -> Void
 
     private var grouped: [(String, [GanttTask])] {
         Dictionary(grouping: tasks, by: \.assignee)
@@ -464,21 +510,33 @@ struct NativeAssigneeView: View {
             ForEach(grouped, id: \.0) { assignee, items in
                 Section {
                     ForEach(items) { task in
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text(task.name)
-                                .font(.system(size: 15, weight: .semibold))
-
+                        Button {
+                            onTaskTap(task)
+                        } label: {
                             HStack {
-                                Text("\(task.progress)%")
-                                Spacer()
-                                Text(task.start.formatted(date: .abbreviated, time: .omitted))
-                                Text("→")
-                                Text(task.end.formatted(date: .abbreviated, time: .omitted))
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(task.name)
+                                        .font(.system(size: 15, weight: .semibold))
+                                        .foregroundStyle(.black)
+
+                                    HStack {
+                                        Text("\(task.progress)%")
+                                        Spacer()
+                                        Text(task.start.formatted(date: .abbreviated, time: .omitted))
+                                        Text("→")
+                                        Text(task.end.formatted(date: .abbreviated, time: .omitted))
+                                    }
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                }
+
+                                Image(systemName: "chevron.right")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
                             }
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 4)
                         }
-                        .padding(.vertical, 4)
+                        .buttonStyle(.plain)
                     }
                 } header: {
                     HStack {
@@ -497,6 +555,7 @@ struct NativeAssigneeView: View {
 struct NativeOverviewView: View {
     let tasks: [GanttTask]
     let projectName: String
+    let onTaskTap: (GanttTask) -> Void
 
     private var completed: Int {
         tasks.filter { $0.progress >= 100 }.count
@@ -555,7 +614,13 @@ struct NativeOverviewView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("下一個進行項目")
                             .font(.headline)
-                        NativeTaskCard(task: next)
+
+                        Button {
+                            onTaskTap(next)
+                        } label: {
+                            NativeTaskCard(task: next)
+                        }
+                        .buttonStyle(.plain)
                     }
                     .padding(16)
                     .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 18))
@@ -616,6 +681,338 @@ private struct NativeTaskCard: View {
         }
         .padding(12)
         .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14))
+    }
+}
+
+struct NativeTaskDetailView: View {
+    @ObservedObject var model: BrowserModel
+    let task: GanttTask
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var draftProgress: Int
+
+    init(model: BrowserModel, task: GanttTask) {
+        self.model = model
+        self.task = task
+        _draftProgress = State(initialValue: task.progress)
+    }
+
+    private var detail: TaskDetail? {
+        model.activeTaskDetail
+    }
+
+    private var progressOptions: [Int] {
+        let options = detail?.progressOptions ?? []
+
+        if options.isEmpty {
+            return [task.progress]
+        }
+
+        return options
+    }
+
+    private var canUpdateProgress: Bool {
+        guard let detail else { return false }
+        return !detail.progressOptions.isEmpty &&
+               !model.taskDetailLoading &&
+               !model.taskProgressSaving
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    titleCard
+                    progressCard
+
+                    if model.taskDetailLoading && detail == nil {
+                        HStack(spacing: 10) {
+                            ProgressView()
+                            Text("正在讀取 Brabio 任務內容…")
+                                .font(.subheadline.weight(.medium))
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(16)
+                        .background(
+                            Color(uiColor: .secondarySystemBackground),
+                            in: RoundedRectangle(cornerRadius: 16)
+                        )
+                    }
+
+                    if let detail {
+                        taskInfoCard(detail)
+
+                        if !detail.content.isEmpty {
+                            contentCard(detail.content)
+                        }
+
+                        if !detail.members.isEmpty {
+                            membersCard(detail.members)
+                        }
+
+                        metadataCard(detail)
+                    }
+
+                    if let message = model.taskDetailMessage,
+                       !message.isEmpty {
+                        Text(message)
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(
+                                message.contains("失敗") ||
+                                message.contains("找不到") ||
+                                message.contains("尚未")
+                                ? Color.red
+                                : Color.green
+                            )
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(14)
+                            .background(
+                                Color(uiColor: .secondarySystemBackground),
+                                in: RoundedRectangle(cornerRadius: 14)
+                            )
+                    }
+                }
+                .padding(14)
+            }
+            .background(Color(uiColor: .systemGroupedBackground))
+            .navigationTitle("任務")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("關閉") {
+                        dismiss()
+                    }
+                }
+
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        model.reloadTaskDetail(task)
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .disabled(model.taskDetailLoading || model.taskProgressSaving)
+                }
+            }
+        }
+        .onAppear {
+            if model.activeTaskDetail?.title != task.name &&
+               !model.taskDetailLoading {
+                model.openTaskDetail(task)
+            }
+        }
+        .onChange(of: model.activeTaskDetail?.progress) { newValue in
+            if let newValue {
+                draftProgress = newValue
+            }
+        }
+    }
+
+    private var titleCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(task.name)
+                .font(.system(size: 24, weight: .bold))
+                .foregroundStyle(.black)
+
+            HStack(spacing: 10) {
+                Label(
+                    task.start.formatted(date: .abbreviated, time: .omitted),
+                    systemImage: "calendar"
+                )
+
+                Text("→")
+
+                Text(
+                    task.end.formatted(date: .abbreviated, time: .omitted)
+                )
+            }
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+
+            if task.assignee != "未指定" {
+                Label(task.assignee, systemImage: "person.fill")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(
+            Color(uiColor: .systemBackground),
+            in: RoundedRectangle(cornerRadius: 18)
+        )
+    }
+
+    private var progressCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("更新進度")
+                    .font(.headline)
+
+                Spacer()
+
+                if model.taskProgressSaving {
+                    ProgressView()
+                } else {
+                    Text("\(draftProgress)%")
+                        .font(.system(size: 20, weight: .bold))
+                }
+            }
+
+            ProgressView(value: Double(draftProgress), total: 100)
+                .tint(.black)
+                .scaleEffect(x: 1, y: 1.7, anchor: .center)
+
+            HStack(spacing: 10) {
+                Picker("進度", selection: $draftProgress) {
+                    ForEach(progressOptions, id: \.self) { value in
+                        Text("\(value)%").tag(value)
+                    }
+                }
+                .pickerStyle(.menu)
+                .disabled(!canUpdateProgress)
+
+                Spacer()
+
+                Button {
+                    model.updateTaskProgress(
+                        task,
+                        progress: draftProgress
+                    )
+                } label: {
+                    Text(model.taskProgressSaving ? "更新中…" : "更新到 Brabio")
+                        .font(.system(size: 15, weight: .bold))
+                        .padding(.horizontal, 15)
+                        .padding(.vertical, 10)
+                        .background(
+                            canUpdateProgress
+                            ? Color.black
+                            : Color.secondary.opacity(0.25),
+                            in: Capsule()
+                        )
+                        .foregroundStyle(.white)
+                }
+                .buttonStyle(.plain)
+                .disabled(!canUpdateProgress)
+            }
+
+            if detail == nil && !model.taskDetailLoading {
+                Text("需要先成功讀取 Brabio 任務內容，才能更新進度。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(16)
+        .background(
+            Color(uiColor: .systemBackground),
+            in: RoundedRectangle(cornerRadius: 18)
+        )
+    }
+
+    private func taskInfoCard(_ detail: TaskDetail) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Brabio 資料")
+                .font(.headline)
+
+            if !detail.period.isEmpty {
+                infoRow(title: "期間", value: detail.period)
+            }
+
+            infoRow(
+                title: "進度",
+                value: "\(detail.progress)%"
+            )
+
+            if !detail.status.isEmpty {
+                infoRow(title: "狀態", value: detail.status)
+            }
+        }
+        .padding(16)
+        .background(
+            Color(uiColor: .systemBackground),
+            in: RoundedRectangle(cornerRadius: 18)
+        )
+    }
+
+    private func contentCard(_ content: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("內容")
+                .font(.headline)
+
+            Text(content)
+                .font(.subheadline)
+                .foregroundStyle(.primary)
+                .textSelection(.enabled)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(
+            Color(uiColor: .systemBackground),
+            in: RoundedRectangle(cornerRadius: 18)
+        )
+    }
+
+    private func membersCard(_ members: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("成員")
+                .font(.headline)
+
+            ForEach(members, id: \.self) { member in
+                Label(member, systemImage: "person.crop.circle.fill")
+                    .font(.subheadline)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(
+            Color(uiColor: .systemBackground),
+            in: RoundedRectangle(cornerRadius: 18)
+        )
+    }
+
+    private func metadataCard(_ detail: TaskDetail) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("更新資訊")
+                .font(.headline)
+
+            if !detail.registeredBy.isEmpty {
+                infoRow(title: "登錄", value: detail.registeredBy)
+            }
+
+            if !detail.updatedBy.isEmpty {
+                infoRow(title: "更新", value: detail.updatedBy)
+            }
+
+            if !detail.lastUpdated.isEmpty {
+                infoRow(title: "最後更新", value: detail.lastUpdated)
+            }
+
+            if detail.registeredBy.isEmpty &&
+               detail.updatedBy.isEmpty &&
+               detail.lastUpdated.isEmpty {
+                Text("Brabio 沒有回傳更新資訊")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(16)
+        .background(
+            Color(uiColor: .systemBackground),
+            in: RoundedRectangle(cornerRadius: 18)
+        )
+    }
+
+    private func infoRow(title: String, value: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 68, alignment: .leading)
+
+            Text(value)
+                .font(.subheadline)
+                .foregroundStyle(.primary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }
 
