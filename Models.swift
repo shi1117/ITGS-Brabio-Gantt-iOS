@@ -34,6 +34,8 @@ struct TaskDetail: Equatable {
     let updatedBy: String
     let content: String
     let members: [String]
+    let attachmentInfo: String
+    let canEditContent: Bool
 }
 
 enum WorkspaceTab: String, CaseIterable, Identifiable {

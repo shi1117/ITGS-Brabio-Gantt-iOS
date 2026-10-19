@@ -690,6 +690,8 @@ struct NativeTaskDetailView: View {
 
     @Environment(\.dismiss) private var dismiss
     @State private var draftProgress: Int
+    @State private var draftContent: String = ""
+    @State private var editingContent = false
 
     init(model: BrowserModel, task: GanttTask) {
         self.model = model
@@ -742,8 +744,10 @@ struct NativeTaskDetailView: View {
                     if let detail {
                         taskInfoCard(detail)
 
-                        if !detail.content.isEmpty {
-                            contentCard(detail.content)
+                        contentCard(detail)
+
+                        if !detail.attachmentInfo.isEmpty {
+                            attachmentCard(detail.attachmentInfo)
                         }
 
                         if !detail.members.isEmpty {
@@ -790,7 +794,11 @@ struct NativeTaskDetailView: View {
                     } label: {
                         Image(systemName: "arrow.clockwise")
                     }
-                    .disabled(model.taskDetailLoading || model.taskProgressSaving)
+                    .disabled(
+                        model.taskDetailLoading ||
+                        model.taskProgressSaving ||
+                        model.taskContentSaving
+                    )
                 }
             }
         }
@@ -805,6 +813,11 @@ struct NativeTaskDetailView: View {
                 draftProgress = newValue
             }
         }
+        .onChange(of: model.activeTaskDetail?.content) { newValue in
+            if let newValue, !editingContent {
+                draftContent = newValue
+            }
+        }
     }
 
     private var titleCard: some View {
@@ -813,20 +826,26 @@ struct NativeTaskDetailView: View {
                 .font(.system(size: 24, weight: .bold))
                 .foregroundStyle(.black)
 
-            HStack(spacing: 10) {
-                Label(
-                    task.start.formatted(date: .abbreviated, time: .omitted),
-                    systemImage: "calendar"
-                )
+            if let detail, !detail.period.isEmpty {
+                Label(detail.period, systemImage: "calendar")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else {
+                HStack(spacing: 10) {
+                    Label(
+                        task.start.formatted(date: .abbreviated, time: .omitted),
+                        systemImage: "calendar"
+                    )
 
-                Text("→")
+                    Text("→")
 
-                Text(
-                    task.end.formatted(date: .abbreviated, time: .omitted)
-                )
+                    Text(
+                        task.end.formatted(date: .abbreviated, time: .omitted)
+                    )
+                }
+                .font(.footnote)
+                .foregroundStyle(.secondary)
             }
-            .font(.footnote)
-            .foregroundStyle(.secondary)
 
             if task.assignee != "未指定" {
                 Label(task.assignee, systemImage: "person.fill")
@@ -933,15 +952,99 @@ struct NativeTaskDetailView: View {
         )
     }
 
-    private func contentCard(_ content: String) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("內容")
-                .font(.headline)
+    private func contentCard(_ detail: TaskDetail) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("內容")
+                    .font(.headline)
 
-            Text(content)
+                Spacer()
+
+                if model.taskContentSaving {
+                    ProgressView()
+                } else if detail.canEditContent && !editingContent {
+                    Button("編輯") {
+                        draftContent = detail.content
+                        editingContent = true
+                    }
+                    .font(.subheadline.weight(.semibold))
+                }
+            }
+
+            if editingContent {
+                TextEditor(text: $draftContent)
+                    .font(.subheadline)
+                    .frame(minHeight: 120)
+                    .padding(8)
+                    .background(
+                        Color(uiColor: .secondarySystemBackground),
+                        in: RoundedRectangle(cornerRadius: 12)
+                    )
+
+                HStack {
+                    Button("取消") {
+                        draftContent = detail.content
+                        editingContent = false
+                    }
+                    .buttonStyle(.bordered)
+
+                    Spacer()
+
+                    Button {
+                        model.updateTaskContent(
+                            task,
+                            content: draftContent
+                        )
+                        editingContent = false
+                    } label: {
+                        Text("儲存到 Brabio")
+                            .fontWeight(.semibold)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.black)
+                    .disabled(model.taskContentSaving)
+                }
+            } else if detail.content.isEmpty {
+                Text("此任務目前沒有內容")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text(detail.content)
+                    .font(.subheadline)
+                    .foregroundStyle(.primary)
+                    .textSelection(.enabled)
+            }
+
+            if !detail.canEditContent {
+                Text("若 Brabio 此任務沒有可用的「変更する」按鈕，手機端會保持唯讀。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(
+            Color(uiColor: .systemBackground),
+            in: RoundedRectangle(cornerRadius: 18)
+        )
+    }
+
+    private func attachmentCard(_ info: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("附件")
+                    .font(.headline)
+
+                Spacer()
+
+                Text(info)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("目前先同步顯示 Brabio 的附件狀態；手機直接上傳附件會另外接檔案選擇器。")
                 .font(.subheadline)
-                .foregroundStyle(.primary)
-                .textSelection(.enabled)
+                .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)

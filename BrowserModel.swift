@@ -20,6 +20,7 @@ final class BrowserModel: ObservableObject {
     @Published var activeTaskDetail: TaskDetail?
     @Published var taskDetailLoading = false
     @Published var taskProgressSaving = false
+    @Published var taskContentSaving = false
     @Published var taskDetailMessage: String?
 
     weak var webView: WKWebView?
@@ -1512,6 +1513,7 @@ final class BrowserModel: ObservableObject {
         activeTaskDetail = nil
         taskDetailLoading = true
         taskProgressSaving = false
+        taskContentSaving = false
         taskDetailMessage = nil
 
         let taskNameJSON = jsonLiteral(task.name)
@@ -1715,6 +1717,7 @@ final class BrowserModel: ObservableObject {
         activeTaskDetail = nil
         taskDetailLoading = false
         taskProgressSaving = false
+        taskContentSaving = false
         taskDetailMessage = nil
     }
 
@@ -1728,9 +1731,12 @@ final class BrowserModel: ObservableObject {
         taskDetailMessage = nil
 
         let target = min(max(progress, 0), 100)
+        let taskNameJSON = jsonLiteral(task.name)
 
         let js = """
         (function() {
+            const taskName = \(taskNameJSON);
+
             function docs(root) {
                 const out = [root];
 
@@ -1759,13 +1765,62 @@ final class BrowserModel: ObservableObject {
                        !el.disabled;
             }
 
-            for (const d of docs(document)) {
-                const selects = Array.from(
-                    d.querySelectorAll('select')
-                ).filter(el => visible(d, el));
+            function clean(value) {
+                return String(value || '')
+                    .replace(/\\s+/g, ' ')
+                    .trim();
+            }
 
-                let progressSelect = null;
-                let targetOption = null;
+            function detailRoot(d) {
+                const titles = Array.from(
+                    d.querySelectorAll('h1,h2,h3,strong,a,span,div,td')
+                )
+                .filter(el => visible(d, el))
+                .filter(el =>
+                    clean(el.innerText || el.textContent) === taskName
+                )
+                .map(el => ({
+                    el,
+                    r: el.getBoundingClientRect()
+                }))
+                .sort((a, b) => b.r.left - a.r.left);
+
+                for (const title of titles) {
+                    let root = title.el;
+
+                    for (let depth = 0; root && depth < 10; depth++) {
+                        const text = clean(root.innerText || root.textContent);
+                        const r = root.getBoundingClientRect();
+
+                        const hits = [
+                            /期間/.test(text),
+                            /進捗/.test(text),
+                            /内容/.test(text),
+                            /添付ファイル/.test(text)
+                        ].filter(Boolean).length;
+
+                        if (
+                            hits >= 2 &&
+                            r.width >= 450 &&
+                            r.height >= 150
+                        ) {
+                            return root;
+                        }
+
+                        root = root.parentElement;
+                    }
+                }
+
+                return null;
+            }
+
+            for (const d of docs(document)) {
+                const root = detailRoot(d);
+                if (!root) continue;
+
+                const selects = Array.from(
+                    root.querySelectorAll('select')
+                ).filter(el => visible(d, el));
 
                 for (const select of selects) {
                     const options = Array.from(select.options || []);
@@ -1786,50 +1841,39 @@ final class BrowserModel: ObservableObject {
 
                     if (!exact) continue;
 
-                    progressSelect = select;
-                    targetOption = exact;
-                    break;
-                }
+                    try {
+                        const setter = Object
+                            .getOwnPropertyDescriptor(
+                                d.defaultView.HTMLSelectElement.prototype,
+                                'value'
+                            )?.set;
 
-                if (!progressSelect || !targetOption) continue;
-
-                const oldValue = progressSelect.value;
-                const newValue = targetOption.value;
-
-                try {
-                    const setter = Object
-                        .getOwnPropertyDescriptor(
-                            d.defaultView.HTMLSelectElement.prototype,
-                            'value'
-                        )?.set;
-
-                    if (setter) {
-                        setter.call(progressSelect, newValue);
-                    } else {
-                        progressSelect.value = newValue;
+                        if (setter) {
+                            setter.call(select, exact.value);
+                        } else {
+                            select.value = exact.value;
+                        }
+                    } catch (_) {
+                        select.value = exact.value;
                     }
-                } catch (_) {
-                    progressSelect.value = newValue;
+
+                    select.dispatchEvent(
+                        new Event('input', { bubbles: true })
+                    );
+
+                    select.dispatchEvent(
+                        new Event('change', { bubbles: true })
+                    );
+
+                    try {
+                        select.blur();
+                    } catch (_) {}
+
+                    return {
+                        status: 'changed',
+                        progress: \(target)
+                    };
                 }
-
-                progressSelect.dispatchEvent(
-                    new Event('input', { bubbles: true })
-                );
-
-                progressSelect.dispatchEvent(
-                    new Event('change', { bubbles: true })
-                );
-
-                try {
-                    progressSelect.blur();
-                } catch (_) {}
-
-                return {
-                    status: 'changed',
-                    oldValue,
-                    newValue,
-                    progress: \(target)
-                };
             }
 
             return {
@@ -1855,7 +1899,7 @@ final class BrowserModel: ObservableObject {
                 guard status == "changed" else {
                     self.taskProgressSaving = false
                     self.taskDetailMessage =
-                        "找不到 Brabio 的進度選單，尚未更新"
+                        "找不到這個任務的 Brabio 進度選單"
                     return
                 }
 
@@ -1874,7 +1918,7 @@ final class BrowserModel: ObservableObject {
 
                 self.taskDetailMessage = "已送出 \(target)% 到 Brabio"
 
-                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                try? await Task.sleep(nanoseconds: 950_000_000)
 
                 self.taskProgressSaving = false
                 self.readTaskDetail(
@@ -1887,6 +1931,317 @@ final class BrowserModel: ObservableObject {
                         assignee: task.assignee
                     )
                 )
+            }
+        }
+    }
+
+    func updateTaskContent(_ task: GanttTask, content: String) {
+        guard let webView else {
+            taskDetailMessage = "Brabio 尚未連線"
+            return
+        }
+
+        taskContentSaving = true
+        taskDetailMessage = nil
+
+        let taskNameJSON = jsonLiteral(task.name)
+        let contentJSON = jsonLiteral(content)
+
+        let openEditJS = """
+        (function() {
+            const taskName = \(taskNameJSON);
+
+            function docs(root) {
+                const out = [root];
+
+                for (const frame of Array.from(root.querySelectorAll('iframe,frame'))) {
+                    try {
+                        if (frame.contentDocument) {
+                            out.push(...docs(frame.contentDocument));
+                        }
+                    } catch (_) {}
+                }
+
+                return out;
+            }
+
+            function visible(d, el) {
+                if (!el) return false;
+
+                const w = d.defaultView || window;
+                const s = w.getComputedStyle(el);
+                const r = el.getBoundingClientRect();
+
+                return r.width > 0 &&
+                       r.height > 0 &&
+                       s.display !== 'none' &&
+                       s.visibility !== 'hidden';
+            }
+
+            function clean(value) {
+                return String(value || '')
+                    .replace(/\\s+/g, ' ')
+                    .trim();
+            }
+
+            function findRoot(d) {
+                const titles = Array.from(
+                    d.querySelectorAll('h1,h2,h3,strong,a,span,div,td')
+                )
+                .filter(el => visible(d, el))
+                .filter(el =>
+                    clean(el.innerText || el.textContent) === taskName
+                )
+                .map(el => ({
+                    el,
+                    r: el.getBoundingClientRect()
+                }))
+                .sort((a, b) => b.r.left - a.r.left);
+
+                for (const title of titles) {
+                    let root = title.el;
+
+                    for (let depth = 0; root && depth < 10; depth++) {
+                        const text = clean(root.innerText || root.textContent);
+                        const r = root.getBoundingClientRect();
+
+                        const hits = [
+                            /期間/.test(text),
+                            /進捗/.test(text),
+                            /内容/.test(text),
+                            /添付ファイル/.test(text)
+                        ].filter(Boolean).length;
+
+                        if (
+                            hits >= 2 &&
+                            r.width >= 450 &&
+                            r.height >= 150
+                        ) {
+                            return root;
+                        }
+
+                        root = root.parentElement;
+                    }
+                }
+
+                return null;
+            }
+
+            for (const d of docs(document)) {
+                const root = findRoot(d);
+                if (!root) continue;
+
+                const candidates = Array.from(
+                    root.querySelectorAll('a,button,[onclick]')
+                )
+                .filter(el => visible(d, el))
+                .filter(el =>
+                    clean(el.innerText || el.textContent || el.value) === '変更する'
+                )
+                .map(el => {
+                    const parentText = clean(
+                        el.parentElement?.innerText ||
+                        el.parentElement?.textContent ||
+                        ''
+                    );
+
+                    let score = 0;
+
+                    if (/コピーする/.test(parentText)) score += 100;
+                    if (/削除する/.test(parentText)) score += 100;
+
+                    const r = el.getBoundingClientRect();
+                    score += Math.max(0, 80 - r.top * 0.02);
+
+                    return { el, score };
+                })
+                .sort((a, b) => b.score - a.score);
+
+                if (!candidates.length) continue;
+
+                try {
+                    candidates[0].el.click();
+                    return 'edit-clicked';
+                } catch (_) {
+                    return 'edit-click-failed';
+                }
+            }
+
+            return 'edit-link-not-found';
+        })();
+        """
+
+        webView.evaluateJavaScript(openEditJS) { [weak self] result, error in
+            Task { @MainActor in
+                guard let self else { return }
+
+                if let error {
+                    self.taskContentSaving = false
+                    self.taskDetailMessage =
+                        "開啟編輯失敗：\(error.localizedDescription)"
+                    return
+                }
+
+                guard (result as? String) == "edit-clicked" else {
+                    self.taskContentSaving = false
+                    self.taskDetailMessage =
+                        "找不到這個任務的「変更する」"
+                    return
+                }
+
+                try? await Task.sleep(nanoseconds: 700_000_000)
+
+                let saveJS = """
+                (function() {
+                    const newContent = \(contentJSON);
+
+                    function docs(root) {
+                        const out = [root];
+
+                        for (const frame of Array.from(root.querySelectorAll('iframe,frame'))) {
+                            try {
+                                if (frame.contentDocument) {
+                                    out.push(...docs(frame.contentDocument));
+                                }
+                            } catch (_) {}
+                        }
+
+                        return out;
+                    }
+
+                    function visible(d, el) {
+                        if (!el) return false;
+
+                        const w = d.defaultView || window;
+                        const s = w.getComputedStyle(el);
+                        const r = el.getBoundingClientRect();
+
+                        return r.width > 0 &&
+                               r.height > 0 &&
+                               s.display !== 'none' &&
+                               s.visibility !== 'hidden' &&
+                               !el.disabled;
+                    }
+
+                    function clean(value) {
+                        return String(value || '')
+                            .replace(/\\s+/g, ' ')
+                            .trim();
+                    }
+
+                    for (const d of docs(document)) {
+                        const textareas = Array.from(
+                            d.querySelectorAll('textarea')
+                        )
+                        .filter(el => visible(d, el))
+                        .filter(el => {
+                            const placeholder = clean(
+                                el.getAttribute('placeholder') || ''
+                            );
+
+                            return !/コメント/.test(placeholder);
+                        })
+                        .sort((a, b) => {
+                            const ar = a.getBoundingClientRect();
+                            const br = b.getBoundingClientRect();
+
+                            return (
+                                br.width * br.height -
+                                ar.width * ar.height
+                            );
+                        });
+
+                        const textarea = textareas[0];
+                        if (!textarea) continue;
+
+                        try {
+                            const setter = Object
+                                .getOwnPropertyDescriptor(
+                                    d.defaultView.HTMLTextAreaElement.prototype,
+                                    'value'
+                                )?.set;
+
+                            if (setter) {
+                                setter.call(textarea, newContent);
+                            } else {
+                                textarea.value = newContent;
+                            }
+                        } catch (_) {
+                            textarea.value = newContent;
+                        }
+
+                        textarea.dispatchEvent(
+                            new Event('input', { bubbles: true })
+                        );
+
+                        textarea.dispatchEvent(
+                            new Event('change', { bubbles: true })
+                        );
+
+                        const form = textarea.closest('form') || d;
+
+                        const buttons = Array.from(
+                            form.querySelectorAll(
+                                'button,input[type="submit"],input[type="button"],a'
+                            )
+                        )
+                        .filter(el => visible(d, el))
+                        .map(el => ({
+                            el,
+                            text: clean(
+                                el.innerText ||
+                                el.value ||
+                                el.textContent ||
+                                ''
+                            )
+                        }))
+                        .filter(item =>
+                            /(変更|保存|更新|登録)/.test(item.text) &&
+                            !/(キャンセル|戻る)/.test(item.text)
+                        );
+
+                        if (!buttons.length) {
+                            return 'save-button-not-found';
+                        }
+
+                        try {
+                            buttons[0].el.click();
+                            return 'submitted';
+                        } catch (_) {
+                            return 'submit-failed';
+                        }
+                    }
+
+                    return 'content-field-not-found';
+                })();
+                """
+
+                webView.evaluateJavaScript(saveJS) { [weak self] result, error in
+                    Task { @MainActor in
+                        guard let self else { return }
+
+                        if let error {
+                            self.taskContentSaving = false
+                            self.taskDetailMessage =
+                                "儲存內容失敗：\(error.localizedDescription)"
+                            return
+                        }
+
+                        guard (result as? String) == "submitted" else {
+                            self.taskContentSaving = false
+                            self.taskDetailMessage =
+                                "沒有找到 Brabio 的內容編輯欄位或儲存按鈕"
+                            return
+                        }
+
+                        self.taskDetailMessage = "內容已送出到 Brabio"
+
+                        try? await Task.sleep(nanoseconds: 1_000_000_000)
+
+                        self.taskContentSaving = false
+                        self.openTaskDetail(task)
+                    }
+                }
             }
         }
     }
@@ -1960,62 +2315,92 @@ final class BrowserModel: ObservableObject {
             }
 
             const entries = docs(document);
-            let best = null;
+            let selected = null;
 
             for (const entry of entries) {
-                for (const el of Array.from(
+                const titles = Array.from(
                     entry.doc.querySelectorAll(
                         'h1,h2,h3,strong,a,span,div,td'
                     )
-                )) {
-                    if (!visible(entry, el)) continue;
+                )
+                .filter(el => visible(entry, el))
+                .filter(el =>
+                    clean(el.innerText || el.textContent) === taskName
+                )
+                .map(el => ({
+                    el,
+                    r: rect(entry, el)
+                }))
+                .sort((a, b) => b.r.left - a.r.left);
 
-                    const text = clean(el.innerText || el.textContent);
+                for (const title of titles) {
+                    let root = title.el;
 
-                    if (text !== taskName) continue;
+                    for (let depth = 0; root && depth < 10; depth++) {
+                        const rootText = clean(
+                            root.innerText || root.textContent
+                        );
 
-                    const r = rect(entry, el);
-                    let score = r.left;
+                        const rr = rect(entry, root);
 
-                    if (/^H[1-3]$/.test(el.tagName)) score += 1000;
-                    if (r.width > 100) score += 100;
+                        const hits = [
+                            /期間/.test(rootText),
+                            /進捗/.test(rootText),
+                            /内容/.test(rootText),
+                            /添付ファイル/.test(rootText)
+                        ].filter(Boolean).length;
 
-                    if (!best || score > best.score) {
-                        best = {
-                            entry,
-                            el,
-                            r,
-                            score
-                        };
+                        if (
+                            hits >= 2 &&
+                            rr.width >= 450 &&
+                            rr.height >= 150
+                        ) {
+                            const score =
+                                title.r.left * 10 -
+                                rr.width * 0.05 -
+                                rr.height * 0.01;
+
+                            if (!selected || score > selected.score) {
+                                selected = {
+                                    entry,
+                                    title,
+                                    root,
+                                    score
+                                };
+                            }
+
+                            break;
+                        }
+
+                        root = root.parentElement;
                     }
                 }
             }
 
-            if (!best) {
+            if (!selected) {
                 return {
-                    status: 'detail-not-found'
+                    status: 'detail-root-not-found'
                 };
             }
 
-            const entry = best.entry;
+            const entry = selected.entry;
             const d = entry.doc;
-            const titleLeft = best.r.left;
+            const root = selected.root;
 
-            const visibleNodes = Array.from(
-                d.querySelectorAll('div,span,td,p,a,label')
+            const nodes = Array.from(
+                root.querySelectorAll(
+                    'div,span,td,p,a,label,strong'
+                )
             )
             .filter(el => visible(entry, el))
             .map(el => ({
                 el,
                 text: clean(el.innerText || el.textContent),
                 r: rect(entry, el)
-            }))
-            .filter(item =>
-                item.r.left >= titleLeft - 40
-            );
+            }));
 
-            function shortestMatching(regex, maxLength = 180) {
-                return visibleNodes
+            function shortestMatching(regex, maxLength = 220) {
+                return nodes
                     .filter(item =>
                         item.text.length > 0 &&
                         item.text.length <= maxLength &&
@@ -2035,17 +2420,17 @@ final class BrowserModel: ObservableObject {
             );
 
             const registeredBy = shortestMatching(
-                /^登録\\s+/,
-                160
+                /^登録/,
+                180
             );
 
             const updatedBy = shortestMatching(
-                /^更新\\s+/,
-                160
+                /^更新/,
+                180
             );
 
             const selects = Array.from(
-                d.querySelectorAll('select')
+                root.querySelectorAll('select')
             ).filter(el => visible(entry, el));
 
             let progress = \(task.progress);
@@ -2054,10 +2439,11 @@ final class BrowserModel: ObservableObject {
 
             for (const select of selects) {
                 const options = Array.from(select.options || []);
+
                 const percentOptions = options
                     .map(option => {
-                        const text = clean(option.textContent);
-                        const m = text.match(/^(\\d{1,3})\\s*%$/);
+                        const optionText = clean(option.textContent);
+                        const m = optionText.match(/^(\\d{1,3})\\s*%$/);
                         return m ? Number(m[1]) : null;
                     })
                     .filter(value =>
@@ -2071,13 +2457,13 @@ final class BrowserModel: ObservableObject {
                         new Set(percentOptions)
                     ).sort((a, b) => a - b);
 
-                    const selected = clean(
+                    const selectedText = clean(
                         select.selectedOptions?.[0]?.textContent ||
                         select.options?.[select.selectedIndex]?.textContent ||
                         ''
                     );
 
-                    const m = selected.match(/(\\d{1,3})\\s*%/);
+                    const m = selectedText.match(/(\\d{1,3})\\s*%/);
 
                     if (m) {
                         progress = Math.max(
@@ -2089,34 +2475,120 @@ final class BrowserModel: ObservableObject {
                     continue;
                 }
 
-                if (!statusText) {
-                    const selected = clean(
+                if (!statusText && options.length > 1) {
+                    const selectedText = clean(
                         select.selectedOptions?.[0]?.textContent ||
                         select.options?.[select.selectedIndex]?.textContent ||
                         ''
                     );
 
                     if (
-                        selected &&
-                        !/^\\d{1,3}\\s*%$/.test(selected)
+                        selectedText &&
+                        !/^\\d{1,3}\\s*%$/.test(selectedText)
                     ) {
-                        statusText = selected;
+                        statusText = selectedText;
                     }
                 }
             }
 
+            const contentTab = nodes
+                .filter(item => item.text === '内容')
+                .sort((a, b) => a.r.top - b.r.top)[0];
+
+            const attachmentTab = nodes
+                .filter(item => /^添付ファイル/.test(item.text))
+                .sort((a, b) => a.r.top - b.r.top)[0];
+
+            const commentField = Array.from(
+                root.querySelectorAll('input,textarea')
+            )
+            .filter(el => visible(entry, el))
+            .map(el => ({
+                el,
+                placeholder: clean(
+                    el.getAttribute('placeholder') || ''
+                ),
+                r: rect(entry, el)
+            }))
+            .find(item =>
+                /コメント/.test(item.placeholder)
+            );
+
+            let content = '';
+
+            if (contentTab) {
+                const lowerBound = contentTab.r.bottom + 3;
+                const upperBound = commentField
+                    ? commentField.r.top - 4
+                    : lowerBound + 260;
+
+                const candidates = Array.from(
+                    root.querySelectorAll('div,td,p,pre')
+                )
+                .filter(el => visible(entry, el))
+                .map(el => {
+                    const r = rect(entry, el);
+
+                    let text = clean(
+                        el.innerText || el.textContent
+                    );
+
+                    text = text
+                        .replace(/添付する/g, ' ')
+                        .replace(/\\d+ファイル/g, ' ')
+                        .replace(/全て表示/g, ' ')
+                        .replace(/\\s+/g, ' ')
+                        .trim();
+
+                    return {
+                        el,
+                        text,
+                        r,
+                        area: r.width * r.height
+                    };
+                })
+                .filter(item =>
+                    item.r.top >= lowerBound &&
+                    item.r.top < upperBound &&
+                    item.r.width >= 250 &&
+                    item.r.height >= 18 &&
+                    item.r.height <= 220 &&
+                    item.text.length >= 2 &&
+                    item.text.length <= 1200 &&
+                    item.text !== taskName &&
+                    !/^(内容|添付ファイル|期間|進捗|登録|更新|最終更新|メンバー)/.test(item.text) &&
+                    !/コメントはありません/.test(item.text)
+                )
+                .sort((a, b) => {
+                    const dy =
+                        Math.abs(a.r.top - lowerBound) -
+                        Math.abs(b.r.top - lowerBound);
+
+                    if (Math.abs(dy) > 4) return dy;
+
+                    return a.area - b.area;
+                });
+
+                if (candidates.length) {
+                    content = candidates[0].text;
+                }
+            }
+
+            const attachmentInfo =
+                attachmentTab?.text || '';
+
             let members = [];
 
-            const memberHeading = visibleNodes.find(item =>
+            const memberHeading = nodes.find(item =>
                 /^メンバー(?:\\s|$)/.test(item.text)
             );
 
             if (memberHeading) {
-                let root = memberHeading.el.parentElement;
+                let memberRoot = memberHeading.el.parentElement;
 
-                for (let i = 0; root && i < 3; i++) {
+                for (let i = 0; memberRoot && i < 4; i++) {
                     const names = Array.from(
-                        root.querySelectorAll('a,span')
+                        memberRoot.querySelectorAll('a,span')
                     )
                     .filter(el => visible(entry, el))
                     .map(el => clean(el.innerText || el.textContent))
@@ -2133,37 +2605,33 @@ final class BrowserModel: ObservableObject {
                         break;
                     }
 
-                    root = root.parentElement;
+                    memberRoot = memberRoot.parentElement;
                 }
             }
 
-            let content = '';
-
-            const contentCandidates = Array.from(
-                d.querySelectorAll('div,td,p')
+            const editCandidates = Array.from(
+                root.querySelectorAll('a,button,[onclick]')
             )
             .filter(el => visible(entry, el))
-            .map(el => ({
-                text: clean(el.innerText || el.textContent),
-                r: rect(entry, el)
-            }))
-            .filter(item =>
-                item.r.left >= titleLeft - 20 &&
-                item.r.width >= 180 &&
-                item.r.height >= 24 &&
-                item.r.height <= 220 &&
-                item.text.length >= 6 &&
-                item.text.length <= 900 &&
-                item.text !== taskName &&
-                !/^(期間|進捗|登録|更新|最終更新|メンバー)/.test(item.text) &&
-                !/コメントはありません/.test(item.text) &&
-                !/コピーする.*変更する.*削除する/.test(item.text)
+            .filter(el =>
+                clean(
+                    el.innerText ||
+                    el.value ||
+                    el.textContent
+                ) === '変更する'
             )
-            .sort((a, b) => b.text.length - a.text.length);
+            .filter(el => {
+                const parentText = clean(
+                    el.parentElement?.innerText ||
+                    el.parentElement?.textContent ||
+                    ''
+                );
 
-            if (contentCandidates.length) {
-                content = contentCandidates[0].text;
-            }
+                return (
+                    /コピーする/.test(parentText) ||
+                    /削除する/.test(parentText)
+                );
+            });
 
             return {
                 status: 'ok',
@@ -2176,7 +2644,9 @@ final class BrowserModel: ObservableObject {
                 registeredBy,
                 updatedBy,
                 content,
-                members
+                members,
+                attachmentInfo,
+                canEditContent: editCandidates.length > 0
             };
         })();
         """
@@ -2197,7 +2667,8 @@ final class BrowserModel: ObservableObject {
                     let object = result as? [String: Any],
                     (object["status"] as? String) == "ok"
                 else {
-                    self.taskDetailMessage = "尚未讀到 Brabio 任務內容"
+                    self.taskDetailMessage =
+                        "尚未讀到正確的 Brabio 任務詳細區"
                     return
                 }
 
@@ -2220,7 +2691,11 @@ final class BrowserModel: ObservableObject {
                     registeredBy: object["registeredBy"] as? String ?? "",
                     updatedBy: object["updatedBy"] as? String ?? "",
                     content: object["content"] as? String ?? "",
-                    members: members
+                    members: members,
+                    attachmentInfo:
+                        object["attachmentInfo"] as? String ?? "",
+                    canEditContent:
+                        object["canEditContent"] as? Bool ?? false
                 )
             }
         }
