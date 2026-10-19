@@ -2091,8 +2091,8 @@ final class BrowserModel: ObservableObject {
                     return
                 }
 
-                try? await Task.sleep(nanoseconds: 800_000_000)
-                self.readTaskDetail(task)
+                try? await Task.sleep(nanoseconds: 1_200_000_000)
+                self.readTaskDetail(task, attempt: 0)
             }
         }
     }
@@ -2100,7 +2100,7 @@ final class BrowserModel: ObservableObject {
     func reloadTaskDetail(_ task: GanttTask) {
         taskDetailLoading = true
         taskDetailMessage = nil
-        readTaskDetail(task)
+        clickTaskAndReadDetail(task)
     }
 
     func closeTaskDetail() {
@@ -2329,7 +2329,8 @@ final class BrowserModel: ObservableObject {
                         end: task.end,
                         progress: target,
                         assignee: task.assignee
-                    )
+                    ),
+                    attempt: 0
                 )
             }
         }
@@ -2629,7 +2630,10 @@ final class BrowserModel: ObservableObject {
         }
     }
 
-    private func readTaskDetail(_ task: GanttTask) {
+    private func readTaskDetail(
+        _ task: GanttTask,
+        attempt: Int = 0
+    ) {
         guard let webView else {
             taskDetailLoading = false
             return
@@ -2663,19 +2667,6 @@ final class BrowserModel: ObservableObject {
                 return out;
             }
 
-            function visible(entry, el) {
-                if (!el) return false;
-
-                const w = entry.doc.defaultView || window;
-                const s = w.getComputedStyle(el);
-                const r = el.getBoundingClientRect();
-
-                return r.width > 0 &&
-                       r.height > 0 &&
-                       s.display !== 'none' &&
-                       s.visibility !== 'hidden';
-            }
-
             function rect(entry, el) {
                 const r = el.getBoundingClientRect();
 
@@ -2691,6 +2682,25 @@ final class BrowserModel: ObservableObject {
                 };
             }
 
+            function styleVisible(entry, el) {
+                if (!el) return false;
+
+                const w = entry.doc.defaultView || window;
+                const s = w.getComputedStyle(el);
+
+                return s.display !== 'none' &&
+                       s.visibility !== 'hidden' &&
+                       Number(s.opacity || 1) > 0.01;
+            }
+
+            function visible(entry, el) {
+                if (!styleVisible(entry, el)) return false;
+
+                const r = el.getBoundingClientRect();
+
+                return r.width > 0 && r.height > 0;
+            }
+
             function clean(value) {
                 return String(value || '')
                     .replace(/\\s+/g, ' ')
@@ -2700,26 +2710,39 @@ final class BrowserModel: ObservableObject {
             function percentValues(select) {
                 return Array.from(select.options || [])
                     .map(option => {
-                        const value = clean(option.textContent);
-                        const m = value.match(/^(\\d{1,3})\\s*%$/);
-                        return m ? Number(m[1]) : null;
+                        const raw = clean(
+                            option.textContent ||
+                            option.innerText ||
+                            option.label ||
+                            option.value
+                        );
+
+                        const m = raw.match(/(\\d{1,3})\\s*%?/);
+
+                        if (!m) return null;
+
+                        const value = Number(m[1]);
+
+                        return (
+                            value >= 0 &&
+                            value <= 100
+                        ) ? value : null;
                     })
-                    .filter(value =>
-                        value !== null &&
-                        value >= 0 &&
-                        value <= 100
-                    );
+                    .filter(value => value !== null);
             }
 
             const entries = docs(document);
             let chosen = null;
+            let totalSelects = 0;
+            let percentSelects = 0;
+            let periodHitsTotal = 0;
 
-            // The real task pane has a percent SELECT (0%..100%).
-            // Score all such selects and strongly prefer one beside "進捗".
+            // The most stable anchor on the real detail pane is the PERIOD row.
+            // It exists even while the old Brabio select widgets are still loading.
             for (const entry of entries) {
                 const d = entry.doc;
 
-                const textNodes = Array.from(
+                const items = Array.from(
                     d.querySelectorAll(
                         'div,span,td,p,a,label,strong,h1,h2,h3'
                     )
@@ -2732,26 +2755,32 @@ final class BrowserModel: ObservableObject {
                 }))
                 .filter(item => item.text.length > 0);
 
-                const progressLabels = textNodes.filter(item =>
+                const periodHits = items.filter(item =>
+                    item.text.length <= 260 &&
+                    (
+                        /\\d{1,2}\\/\\d{1,2}.*～.*\\d{1,2}\\/\\d{1,2}/.test(item.text) ||
+                        /^期間\\s+.*\\d{1,2}\\/\\d{1,2}/.test(item.text)
+                    )
+                );
+
+                periodHitsTotal += periodHits.length;
+
+                const progressLabels = items.filter(item =>
+                    item.text.length <= 80 &&
                     (
                         item.text === '進捗' ||
                         /^進捗\\s/.test(item.text)
-                    ) &&
-                    item.text.length <= 40
+                    )
                 );
 
-                const periodLabels = textNodes.filter(item =>
-                    (
-                        item.text === '期間' ||
-                        /^期間\\s/.test(item.text)
-                    ) &&
-                    item.text.length <= 80
+                const titleHits = items.filter(item =>
+                    item.text === taskName
                 );
 
                 const commentFields = Array.from(
                     d.querySelectorAll('input,textarea')
                 )
-                .filter(el => visible(entry, el))
+                .filter(el => styleVisible(entry, el))
                 .map(el => ({
                     el,
                     placeholder: clean(
@@ -2763,66 +2792,91 @@ final class BrowserModel: ObservableObject {
                     /コメント/.test(item.placeholder)
                 );
 
-                for (const select of Array.from(
+                const selects = Array.from(
                     d.querySelectorAll('select')
-                )) {
-                    if (!visible(entry, select)) continue;
+                );
 
-                    const percentages = percentValues(select);
+                totalSelects += selects.length;
 
-                    if (percentages.length < 2) continue;
+                for (const select of selects) {
+                    const values = percentValues(select);
 
-                    const r = rect(entry, select);
+                    if (values.length >= 2) {
+                        percentSelects += 1;
+                    }
+                }
 
-                    const nearbyProgress = progressLabels
+                for (const period of periodHits) {
+                    const progress = progressLabels
                         .filter(item =>
-                            Math.abs(item.r.cy - r.cy) <= 45 &&
-                            item.r.left <= r.left + 40
+                            item.r.top >= period.r.top - 20 &&
+                            item.r.top <= period.r.bottom + 140 &&
+                            item.r.left >= period.r.left - 160
                         )
                         .sort((a, b) =>
-                            Math.abs(a.r.cy - r.cy) -
-                            Math.abs(b.r.cy - r.cy)
+                            Math.abs(a.r.cy - period.r.cy) -
+                            Math.abs(b.r.cy - period.r.cy)
                         )[0] || null;
 
-                    const nearbyPeriod = periodLabels
+                    const title = titleHits
                         .filter(item =>
-                            item.r.cy < r.cy + 20 &&
-                            item.r.cy > r.cy - 160 &&
-                            Math.abs(item.r.left - (nearbyProgress?.r.left ?? r.left)) <= 260
+                            item.r.bottom <= period.r.bottom + 20 &&
+                            item.r.top >= period.r.top - 180
                         )
                         .sort((a, b) =>
-                            Math.abs(b.r.cy - r.cy) -
-                            Math.abs(a.r.cy - r.cy)
+                            b.r.left - a.r.left
                         )[0] || null;
 
-                    const nearbyComment = commentFields
+                    const comment = commentFields
                         .filter(item =>
-                            item.r.top > r.bottom &&
-                            item.r.top < r.bottom + 700
+                            item.r.top > period.r.bottom &&
+                            item.r.top < period.r.bottom + 900
                         )
                         .sort((a, b) =>
                             a.r.top - b.r.top
                         )[0] || null;
 
-                    let score = r.left * 5;
+                    const nearbySelects = selects
+                        .map(el => ({
+                            el,
+                            r: rect(entry, el),
+                            values: percentValues(el)
+                        }))
+                        .filter(item =>
+                            item.r.top >= period.r.top - 30 &&
+                            item.r.top <= period.r.bottom + 180
+                        );
 
-                    if (nearbyProgress) score += 10000;
-                    if (nearbyPeriod) score += 2500;
-                    if (nearbyComment) score += 2500;
+                    const percentSelect = nearbySelects
+                        .filter(item => item.values.length >= 2)
+                        .sort((a, b) => {
+                            if (progress) {
+                                return (
+                                    Math.abs(a.r.cy - progress.r.cy) -
+                                    Math.abs(b.r.cy - progress.r.cy)
+                                );
+                            }
 
-                    // A task percent select normally has several percent options.
-                    score += percentages.length * 20;
+                            return b.r.left - a.r.left;
+                        })[0] || null;
+
+                    let score = period.r.left * 2;
+
+                    if (progress) score += 3000;
+                    if (title) score += 4000;
+                    if (comment) score += 2200;
+                    if (percentSelect) score += 5000;
 
                     if (!chosen || score > chosen.score) {
                         chosen = {
                             entry,
-                            select,
-                            selectRect: r,
-                            percentages,
-                            progressLabel: nearbyProgress,
-                            periodLabel: nearbyPeriod,
-                            commentField: nearbyComment,
-                            textNodes,
+                            items,
+                            period,
+                            progress,
+                            title,
+                            comment,
+                            percentSelect,
+                            nearbySelects,
                             score
                         };
                     }
@@ -2831,142 +2885,149 @@ final class BrowserModel: ObservableObject {
 
             if (!chosen) {
                 return {
-                    status: 'progress-pane-not-found'
+                    status: 'period-pane-not-found',
+                    totalSelects,
+                    percentSelects,
+                    periodHits: periodHitsTotal
                 };
             }
 
             const entry = chosen.entry;
             const d = entry.doc;
-            const select = chosen.select;
-            const selectRect = chosen.selectRect;
-            const textNodes = chosen.textNodes;
+            const periodItem = chosen.period;
+            const progressLabel = chosen.progress;
+            const commentField = chosen.comment;
 
-            const progressLabel = chosen.progressLabel;
             const detailLeft = Math.max(
                 0,
-                (progressLabel?.r.left ?? selectRect.left) - 120
+                Math.min(
+                    periodItem.r.left,
+                    progressLabel?.r.left ?? periodItem.r.left
+                ) - 120
             );
 
-            // Comment box is the cleanest bottom boundary of the content area.
-            let commentField = chosen.commentField;
+            let progressSelect = chosen.percentSelect;
 
-            if (!commentField) {
-                const comments = Array.from(
-                    d.querySelectorAll('input,textarea')
+            // If the percent select wasn't ready during the first scan,
+            // scan the whole document but only accept selects close to the
+            // period/progress row.
+            if (!progressSelect) {
+                const fallback = Array.from(
+                    d.querySelectorAll('select')
                 )
-                .filter(el => visible(entry, el))
                 .map(el => ({
                     el,
-                    placeholder: clean(
-                        el.getAttribute('placeholder') || ''
-                    ),
-                    r: rect(entry, el)
+                    r: rect(entry, el),
+                    values: percentValues(el)
                 }))
                 .filter(item =>
-                    /コメント/.test(item.placeholder) &&
-                    item.r.top > selectRect.bottom &&
-                    item.r.left >= detailLeft - 80
-                )
-                .sort((a, b) =>
-                    a.r.top - b.r.top
-                );
-
-                commentField = comments[0] || null;
-            }
-
-            // Exact period string in the same right-side area.
-            const periodCandidates = textNodes
-                .filter(item =>
-                    item.r.left >= detailLeft - 100 &&
-                    item.r.top < selectRect.top + 40 &&
-                    item.r.top > selectRect.top - 220 &&
-                    /\\d{1,2}\\/\\d{1,2}.*～.*\\d{1,2}\\/\\d{1,2}/.test(item.text) &&
-                    item.text.length <= 240
+                    item.values.length >= 2 &&
+                    item.r.top >= periodItem.r.top - 60 &&
+                    item.r.top <= periodItem.r.bottom + 220
                 )
                 .sort((a, b) => {
-                    if (a.text.length !== b.text.length) {
-                        return a.text.length - b.text.length;
+                    if (progressLabel) {
+                        const ad =
+                            Math.abs(a.r.cy - progressLabel.r.cy);
+                        const bd =
+                            Math.abs(b.r.cy - progressLabel.r.cy);
+
+                        if (Math.abs(ad - bd) > 3) {
+                            return ad - bd;
+                        }
                     }
 
                     return b.r.left - a.r.left;
-                });
+                })[0] || null;
 
-            const period =
-                periodCandidates[0]?.text ||
-                chosen.periodLabel?.text ||
-                '';
-
-            const selectedText = clean(
-                select.selectedOptions?.[0]?.textContent ||
-                select.options?.[select.selectedIndex]?.textContent ||
-                ''
-            );
-
-            let progress = \(task.progress);
-            const selectedMatch = selectedText.match(
-                /(\\d{1,3})\\s*%/
-            );
-
-            if (selectedMatch) {
-                progress = Math.max(
-                    0,
-                    Math.min(100, Number(selectedMatch[1]))
-                );
+                progressSelect = fallback;
             }
 
-            const progressOptions = Array.from(
-                new Set(chosen.percentages)
-            ).sort((a, b) => a - b);
-
-            // Status select is usually immediately to the left of the % select.
+            let progress = \(task.progress);
+            let progressOptions = [];
             let statusText = '';
 
-            const nearbySelects = Array.from(
-                d.querySelectorAll('select')
-            )
-            .filter(el => visible(entry, el))
-            .map(el => ({
-                el,
-                r: rect(entry, el)
-            }))
-            .filter(item =>
-                Math.abs(item.r.cy - selectRect.cy) <= 35 &&
-                item.r.left < selectRect.left &&
-                item.r.left > selectRect.left - 320
-            )
-            .sort((a, b) =>
-                b.r.left - a.r.left
-            );
+            if (progressSelect) {
+                progressOptions = Array.from(
+                    new Set(progressSelect.values)
+                ).sort((a, b) => a - b);
 
-            for (const item of nearbySelects) {
-                if (percentValues(item.el).length >= 2) continue;
+                const select = progressSelect.el;
 
-                const value = clean(
-                    item.el.selectedOptions?.[0]?.textContent ||
-                    item.el.options?.[item.el.selectedIndex]?.textContent ||
+                const selectedRaw = clean(
+                    select.selectedOptions?.[0]?.textContent ||
+                    select.options?.[select.selectedIndex]?.textContent ||
+                    select.value ||
                     ''
                 );
 
-                if (value) {
-                    statusText = value;
-                    break;
+                const selectedMatch =
+                    selectedRaw.match(/(\\d{1,3})/);
+
+                if (selectedMatch) {
+                    const value = Number(selectedMatch[1]);
+
+                    if (value >= 0 && value <= 100) {
+                        progress = value;
+                    }
+                }
+
+                // Status select: same row, immediately to the left.
+                const statusCandidates = Array.from(
+                    d.querySelectorAll('select')
+                )
+                .map(el => ({
+                    el,
+                    r: rect(entry, el),
+                    values: percentValues(el)
+                }))
+                .filter(item =>
+                    item.el !== select &&
+                    item.values.length < 2 &&
+                    Math.abs(item.r.cy - progressSelect.r.cy) <= 40 &&
+                    item.r.left < progressSelect.r.left &&
+                    item.r.left > progressSelect.r.left - 360
+                )
+                .sort((a, b) =>
+                    b.r.left - a.r.left
+                );
+
+                if (statusCandidates.length) {
+                    const statusSelect =
+                        statusCandidates[0].el;
+
+                    statusText = clean(
+                        statusSelect.selectedOptions?.[0]?.textContent ||
+                        statusSelect.options?.[statusSelect.selectedIndex]?.textContent ||
+                        statusSelect.value ||
+                        ''
+                    );
                 }
             }
 
-            // Content region:
-            // starts below the progress row; ends at the comment input.
-            const lowerBound = selectRect.bottom + 45;
+            const period = periodItem.text;
+
+            // Main content:
+            // from below the progress/period controls down to comment box.
+            const progressBottom = Math.max(
+                periodItem.r.bottom,
+                progressLabel?.r.bottom ?? periodItem.r.bottom,
+                progressSelect?.r.bottom ?? periodItem.r.bottom
+            );
+
+            const lowerBound = progressBottom + 35;
+
             const upperBound = commentField
                 ? commentField.r.top - 6
-                : lowerBound + 420;
+                : lowerBound + 520;
 
             const mainLeft = commentField
-                ? commentField.r.left - 18
+                ? commentField.r.left - 20
                 : detailLeft;
 
             const mainRight = commentField
-                ? commentField.r.right + 18
-                : detailLeft + 1000;
+                ? commentField.r.right + 20
+                : detailLeft + 1100;
 
             const walker = d.createTreeWalker(
                 d.body,
@@ -2986,12 +3047,13 @@ final class BrowserModel: ObservableObject {
                 const value = clean(node.nodeValue || '');
 
                 if (!value) continue;
-
                 if (r.top < lowerBound || r.top >= upperBound) continue;
                 if (r.right < mainLeft || r.left > mainRight) continue;
 
                 if (
                     value === taskName ||
+                    /^期間(?:\\s|$)/.test(value) ||
+                    /^進捗(?:\\s|$)/.test(value) ||
                     value === '内容' ||
                     /^添付ファイル/.test(value) ||
                     value === '添付する' ||
@@ -3004,95 +3066,81 @@ final class BrowserModel: ObservableObject {
                     continue;
                 }
 
-                // Ignore tiny UI/status fragments.
-                if (
-                    /^(期間|進捗|登録|更新|最終更新)$/.test(value)
-                ) {
-                    continue;
-                }
-
                 if (!seenContent.has(value)) {
                     seenContent.add(value);
                     contentParts.push(value);
                 }
             }
 
-            const content = contentParts
-                .join('\\n')
-                .trim();
+            const content =
+                contentParts.join('\\n').trim();
 
-            const attachmentItem = textNodes
+            const items = chosen.items;
+
+            const attachmentInfo = items
                 .filter(item =>
                     /^添付ファイル/.test(item.text) &&
-                    item.r.top > selectRect.bottom &&
-                    item.r.top < upperBound &&
-                    item.r.left >= mainLeft - 80
+                    item.r.top >= lowerBound - 80 &&
+                    item.r.top < upperBound
                 )
                 .sort((a, b) =>
                     a.r.top - b.r.top
-                )[0] || null;
+                )[0]?.text || '';
 
-            const attachmentInfo =
-                attachmentItem?.text || '';
-
-            // Update metadata near top.
-            const lastUpdated = textNodes
+            const lastUpdated = items
                 .filter(item =>
                     /最終更新/.test(item.text) &&
-                    item.r.left >= detailLeft - 100 &&
-                    item.r.top > selectRect.top - 100 &&
-                    item.r.top < lowerBound
+                    item.r.left >= detailLeft - 120 &&
+                    item.r.top < lowerBound &&
+                    item.text.length <= 240
                 )
                 .sort((a, b) =>
                     a.text.length - b.text.length
                 )[0]?.text || '';
 
-            const registeredBy = textNodes
+            const registeredBy = items
                 .filter(item =>
                     /^登録/.test(item.text) &&
-                    item.r.left >= detailLeft - 100 &&
+                    item.r.left >= detailLeft - 120 &&
                     item.r.top < lowerBound &&
-                    item.text.length <= 180
+                    item.text.length <= 200
                 )
                 .sort((a, b) =>
                     a.text.length - b.text.length
                 )[0]?.text || '';
 
-            const updatedBy = textNodes
+            const updatedBy = items
                 .filter(item =>
                     /^更新/.test(item.text) &&
-                    item.r.left >= detailLeft - 100 &&
+                    item.r.left >= detailLeft - 120 &&
                     item.r.top < lowerBound &&
-                    item.text.length <= 180
+                    item.text.length <= 200
                 )
                 .sort((a, b) =>
                     a.text.length - b.text.length
                 )[0]?.text || '';
 
-            // Members are normally to the right of the main content column.
             let members = [];
 
-            const memberHeading = textNodes
+            const memberHeading = items
                 .filter(item =>
                     /^メンバー(?:\\s|$)/.test(item.text) &&
-                    item.r.top > selectRect.bottom &&
-                    item.r.top < upperBound + 350
+                    item.r.top > lowerBound - 120
                 )
                 .sort((a, b) =>
                     b.r.left - a.r.left
                 )[0] || null;
 
             if (memberHeading) {
-                let memberRoot =
-                    memberHeading.el.parentElement;
+                let root = memberHeading.el.parentElement;
 
                 for (
                     let depth = 0;
-                    memberRoot && depth < 4;
+                    root && depth < 4;
                     depth++
                 ) {
                     const names = Array.from(
-                        memberRoot.querySelectorAll('a,span')
+                        root.querySelectorAll('a,span')
                     )
                     .filter(el => visible(entry, el))
                     .map(el =>
@@ -3112,12 +3160,10 @@ final class BrowserModel: ObservableObject {
                         break;
                     }
 
-                    memberRoot =
-                        memberRoot.parentElement;
+                    root = root.parentElement;
                 }
             }
 
-            // Detect the real task-level edit link.
             let canEditContent = false;
 
             const changeLinks = Array.from(
@@ -3135,15 +3181,6 @@ final class BrowserModel: ObservableObject {
             );
 
             for (const change of changeLinks) {
-                const cr = rect(entry, change);
-
-                if (
-                    cr.top > lowerBound + 80 ||
-                    cr.left < detailLeft
-                ) {
-                    continue;
-                }
-
                 let root = change.parentElement;
 
                 for (
@@ -3151,13 +3188,13 @@ final class BrowserModel: ObservableObject {
                     root && depth < 5;
                     depth++
                 ) {
-                    const rootText = clean(
+                    const text = clean(
                         root.innerText || root.textContent
                     );
 
                     if (
-                        /コピーする/.test(rootText) &&
-                        /削除する/.test(rootText)
+                        /コピーする/.test(text) &&
+                        /削除する/.test(text)
                     ) {
                         canEditContent = true;
                         break;
@@ -3184,7 +3221,9 @@ final class BrowserModel: ObservableObject {
                 attachmentInfo,
                 canEditContent,
                 debug:
-                    `progressX:${Math.round(selectRect.left)} ` +
+                    `periodHits:${periodHitsTotal} ` +
+                    `allSelects:${totalSelects} ` +
+                    `percentSelects:${percentSelects} ` +
                     `options:${progressOptions.length} ` +
                     `comment:${commentField ? 1 : 0} ` +
                     `content:${content.length} ` +
@@ -3197,9 +3236,23 @@ final class BrowserModel: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
 
-                self.taskDetailLoading = false
-
                 if let error {
+                    if attempt < 5 {
+                        try? await Task.sleep(
+                            nanoseconds: UInt64(
+                                700_000_000 +
+                                attempt * 350_000_000
+                            )
+                        )
+
+                        self.readTaskDetail(
+                            task,
+                            attempt: attempt + 1
+                        )
+                        return
+                    }
+
+                    self.taskDetailLoading = false
                     self.taskDetailMessage =
                         "讀取任務內容失敗：\(error.localizedDescription)"
                     return
@@ -3209,14 +3262,58 @@ final class BrowserModel: ObservableObject {
                     let object = result as? [String: Any],
                     (object["status"] as? String) == "ok"
                 else {
+                    let object =
+                        result as? [String: Any]
+
                     let status =
-                        (result as? [String: Any])?["status"]
-                        as? String ?? "unknown"
+                        object?["status"] as? String
+                        ?? "unknown"
+
+                    if attempt < 5 {
+                        self.taskDetailMessage =
+                            "等待 Brabio 任務資料… \(attempt + 1)/6"
+
+                        try? await Task.sleep(
+                            nanoseconds: UInt64(
+                                700_000_000 +
+                                attempt * 350_000_000
+                            )
+                        )
+
+                        // Halfway through, re-click the task once in case
+                        // Brabio swallowed the original synthetic click.
+                        if attempt == 2 {
+                            self.clickTaskAndReadDetail(task)
+                        } else {
+                            self.readTaskDetail(
+                                task,
+                                attempt: attempt + 1
+                            )
+                        }
+
+                        return
+                    }
+
+                    self.taskDetailLoading = false
+
+                    let totalSelects =
+                        (object?["totalSelects"] as? NSNumber)?.intValue
+                        ?? 0
+
+                    let percentSelects =
+                        (object?["percentSelects"] as? NSNumber)?.intValue
+                        ?? 0
+
+                    let periodHits =
+                        (object?["periodHits"] as? NSNumber)?.intValue
+                        ?? 0
 
                     self.taskDetailMessage =
-                        "尚未讀到正確的 Brabio 任務詳細區（\(status)）"
+                        "尚未讀到 Brabio 任務詳細區（\(status) period:\(periodHits) select:\(totalSelects)/\(percentSelects)）"
                     return
                 }
+
+                self.taskDetailLoading = false
 
                 let options = (
                     object["progressOptions"] as? [NSNumber]
